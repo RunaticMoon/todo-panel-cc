@@ -13,6 +13,13 @@ When Claude hands you a checklist mid-conversation (review and merge a PR, check
 - **전체** expands the whole list, grouped by section (✓ done, ▶ next, ○ open). Click a step to toggle it.
 - Once every step is done the band says so and offers **지우기** (clear).
 - Hotkeys d / a / h / c work while the band has focus (ctrl+x tab).
+- The next step is also pinned as a status line under the prompt (`todo-panel: 📋 다음 할 일 2/4: …`), which no other plugin can cover.
+
+### When another plugin holds the band
+
+The band above the prompt draws one tree. A plugin that draws its own band without passing it on (a custom effort/status panel, say) hides todo-panel's band. todo-panel notices that its band never runs and opens a **pane** with the full list instead, docked beside the transcript. A pane the model's tool call opens on its own is drawn only on terminals at least 144 columns wide; `/todo` or `/todo pane` opens it at any width. The status line shows the next step either way.
+
+When todo-panel is the one above, it keeps whatever the plugins beneath draw, under its list.
 
 ## How the list gets there
 
@@ -29,7 +36,8 @@ If Claude did not pin a list, `/todo scan` asks a fork of the conversation to fi
 
 | Command | What it does |
 | --- | --- |
-| `/todo` | Toggle between the next step and the full list |
+| `/todo` | Toggle between the next step and the full list (opens the pane when the band is held) |
+| `/todo pane` | Open the full list in a pane |
 | `/todo done [n…]` | Mark the next step (or steps n…) done |
 | `/todo undo <n…>` | Mark steps n… not done |
 | `/todo scan` | Find the latest list in Claude's replies and pin it |

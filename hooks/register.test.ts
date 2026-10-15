@@ -71,7 +71,8 @@ test('the model marks tasks by number and the list clears', async ($, on) => {
   await ui.unmount()
 })
 
-test('/todo done and undo change the list', async $ => {
+test('/todo done and undo change the list', async ($, on) => {
+  engineBand(on)
   await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
   const done = await $.command.run({ command: 'todo', args: 'done', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 100 } })
   expect(done.text).toContain('1번')
@@ -118,4 +119,50 @@ test('the guidance is one static session section at the end', async ($, on) => {
   expect(last?.scope).toBe('session')
   expect(after.sections[0]?.id).toBe('intro')
   expect(after.sections).toEqual(before.sections)
+})
+
+test('a band another plugin holds sends the list to a pane and the status line', async ($, on) => {
+  const opened: string[] = []
+  const statuses: (string | undefined)[] = []
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true as const } }
+  })
+  on('ui.status', (_, e) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
+
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  expect(opened).toEqual(['todo-panel'])
+  expect(statuses[statuses.length - 1]).toContain('다음 할 일 1/3: #49를 Ready로')
+
+  const pane = await $.ui.mount({
+    plugin: 'todo-panel',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'todo-panel',
+    props: { title: '할 일', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  })
+  expect(await pane.find({ key: 't2' })).toBeDefined()
+  await pane.press({ key: 'done' })
+  expect(statuses[statuses.length - 1]).toContain('다음 할 일 2/3')
+  await pane.unmount()
+})
+
+test('the band keeps what the plugins beneath draw', async ($, on) => {
+  engineBand(on)
+  const opened: string[] = []
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true as const } }
+  })
+
+  const ui = await $.ui.mount({ plugin: 'todo-panel', surface: 'terminal', ...BAND })
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+
+  expect(await ui.find({ key: 'header' })).toBeDefined()
+  expect(await ui.find({ key: 'engine' })).toBeDefined()
+  expect(opened).toEqual([])
+  await ui.unmount()
 })
