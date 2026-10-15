@@ -12,7 +12,8 @@ When Claude hands you a checklist mid-conversation (review and merge a PR, check
 
 - **전체** expands the whole list, grouped by section (✓ done, ▶ next, ○ open). Click a step to toggle it.
 - Once every step is done the band says so and offers **지우기** (clear).
-- Hotkeys d / a / h / c work while the band has focus (ctrl+x tab).
+- Hotkeys d / a / h / c (and q to close the pane) work while the band or pane has focus (ctrl+x tab).
+- In the fullscreen layout (`/tui fullscreen`) every button and every step in the expanded list takes a mouse click.
 - The next step is also pinned as a status line under the prompt (`todo-panel: 📋 다음 할 일 2/4: …`), which no other plugin can cover.
 
 ### When another plugin holds the band
@@ -37,7 +38,7 @@ If Claude did not pin a list, `/todo scan` asks a fork of the conversation to fi
 | Command | What it does |
 | --- | --- |
 | `/todo` | Toggle between the next step and the full list (opens the pane when the band is held) |
-| `/todo pane` | Open the full list in a pane |
+| `/todo pane` / `/todo close` | Open or close the full list in a pane (the pane's **닫기** button and its ✕ close it too) |
 | `/todo done [n…]` | Mark the next step (or steps n…) done |
 | `/todo undo <n…>` | Mark steps n… not done |
 | `/todo scan` | Find the latest list in Claude's replies and pin it |
