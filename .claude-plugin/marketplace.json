@@ -1,0 +1,12 @@
+{
+  "name": "todo-panel-cc",
+  "owner": { "name": "RunaticMoon" },
+  "description": "Claude Code mod that pins the steps you have to do yourself above the prompt",
+  "plugins": [
+    {
+      "name": "todo-panel",
+      "source": "./",
+      "description": "Pins the steps Claude asked you to do yourself above the prompt, showing what to do next"
+    }
+  ]
+}
