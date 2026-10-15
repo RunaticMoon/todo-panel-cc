@@ -69,8 +69,8 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'todo',
-      description: 'User task panel: toggle the full list, or done/undo <n>, scan, pane, show, hide, clear',
-      argumentHint: '[done [n] | undo <n> | scan | pane | show | hide | clear]',
+      description: 'User task panel: toggle the full list, or done/undo <n>, scan, pane, close, show, hide, clear',
+      argumentHint: '[done [n] | undo <n> | scan | pane | close | show | hide | clear]',
       immediate: true,
     })
     await syncStatus($)
@@ -143,6 +143,11 @@ export const register: Register = on => {
       return { text: '할 일 목록을 지웠습니다.' }
     }
 
+    if (verb === 'close') {
+      await closePane($)
+      return { text: '할 일 패널을 닫았습니다. /todo 로 다시 엽니다.' }
+    }
+
     if (verb === 'hide') {
       await update($, isHidden, () => true)
       await syncStatus($)
@@ -213,7 +218,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         <Box key="sized" width={Math.max(20, e.props.bodyColumns)}>
-          {drawList($, elements, current, { expanded, canExpand: true })}
+          {drawList($, elements, current, { expanded, canExpand: true, canClose: false })}
         </Box>
         {below}
       </Box>
@@ -223,15 +228,20 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const current = await read($, list)
     const elements = $.ui.resolve(e) as unknown as ListElements
-    const { Box, Text } = elements
+    const { Box, Button, Text } = elements
 
     if (current === null) {
-      return <Text dimColor>고정된 할 일이 없습니다. /todo scan 으로 최근 응답에서 찾아볼 수 있습니다.</Text>
+      return (
+        <Box flexDirection="column">
+          <Text dimColor>고정된 할 일이 없습니다. /todo scan 으로 최근 응답에서 찾아볼 수 있습니다.</Text>
+          <Button key="close" hotkey="q" role="dismiss" label="닫기" onPress={() => closePane($)} />
+        </Box>
+      )
     }
 
     return (
       <Box flexDirection="column" width={Math.max(20, e.props.bodyColumns)}>
-        {drawList($, elements, current, { expanded: true, canExpand: false })}
+        {drawList($, elements, current, { expanded: true, canExpand: false, canClose: true })}
       </Box>
     )
   })
@@ -239,11 +249,11 @@ export const register: Register = on => {
 
 type ListElements = Pick<Elements['terminal'], 'Box' | 'Button' | 'Text'>
 
-type DrawOptions = { expanded: boolean; canExpand: boolean }
+type DrawOptions = { expanded: boolean; canExpand: boolean; canClose: boolean }
 
 // The list as the band and the pane draw it: the next task, or every task when expanded.
 function drawList($: EngineInterface, { Box, Button, Text }: ListElements, current: TaskList, options: DrawOptions) {
-  const { expanded, canExpand } = options
+  const { expanded, canExpand, canClose } = options
   const next_ = nextIndex(current)
   const total = current.tasks.length
 
@@ -274,6 +284,7 @@ function drawList($: EngineInterface, { Box, Button, Text }: ListElements, curre
       {canExpand && <Button key="expand" hotkey="a" label={expanded ? '접기' : `전체 (${total})`} onPress={() => update($, isExpanded, open => !open)} />}
       {next_ === -1 && <Button key="clear" hotkey="c" label="지우기" onPress={() => changeList($, () => null)} />}
       {canExpand && <Button key="hide" hotkey="h" label="숨기기" onPress={hide} />}
+      {canClose && <Button key="close" hotkey="q" role="dismiss" label="닫기" onPress={() => closePane($)} />}
     </Box>
   )
 
@@ -350,6 +361,14 @@ async function openPane($: EngineInterface, isAsked: boolean) {
     await $.ui.open({ id: PANE, title: '할 일' })
   } catch {
     // No surface takes panes here; the status line still shows the next task.
+  }
+}
+
+async function closePane($: EngineInterface) {
+  try {
+    await $.ui.close({ id: PANE })
+  } catch {
+    // Already closed.
   }
 }
 

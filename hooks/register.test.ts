@@ -166,3 +166,28 @@ test('the band keeps what the plugins beneath draw', async ($, on) => {
   expect(opened).toEqual([])
   await ui.unmount()
 })
+
+test('the pane closes from its own button and from /todo close', async ($, on) => {
+  const closed: string[] = []
+  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.close', (_, e) => {
+    closed.push(e.id)
+    return { value: undefined }
+  })
+
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  const pane = await $.ui.mount({
+    plugin: 'todo-panel',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'todo-panel',
+    props: { title: '할 일', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  })
+  await pane.press({ key: 'close' })
+  expect(closed).toEqual(['todo-panel'])
+  await pane.unmount()
+
+  const answer = await $.command.run({ command: 'todo', args: 'close', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 100 } })
+  expect(answer.text).toContain('닫았습니다')
+  expect(closed).toEqual(['todo-panel', 'todo-panel'])
+})
