@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { parseJsonObject, parseTasks, toIndexes } from './tasks'
+import { parseJsonObject, parseTasks, statusLine, toIndexes } from './tasks'
 
 test('toIndexes takes numbers and digit strings only', async () => {
   expect(toIndexes([1, '2', true, null, 0, 9, 1.5, ' 3 '], 3)).toEqual([0, 1, 2])
@@ -20,4 +20,12 @@ test('parseJsonObject finds the object among prose and fences', async () => {
   expect(parseJsonObject('Here: {"tasks": ["a"]} and {not json}')).toEqual({ tasks: ['a'] })
   expect(parseJsonObject('note {x}\n```json\n{"tasks": [{"text": "a } b"}]}\n```')).toEqual({ tasks: [{ text: 'a } b' }] })
   expect(parseJsonObject('nothing here')).toBeUndefined()
+})
+
+test('statusLine names the next task, or says all are done', async () => {
+  const list = parseTasks({ tasks: ['a', 'b'] })!
+  expect(statusLine(list, false)).toBe('📋 다음 할 일 1/2: a')
+  expect(statusLine(list, true)).toBeUndefined()
+  expect(statusLine(null, false)).toBeUndefined()
+  expect(statusLine({ ...list, tasks: list.tasks.map(t => ({ ...t, isDone: true })) }, false)).toContain('2/2 완료')
 })

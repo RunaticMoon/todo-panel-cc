@@ -55,6 +55,25 @@ export function doneCount(list: TaskList): number {
   return list.tasks.filter(task => task.isDone).length
 }
 
+// One line for the status line under the prompt; undefined clears it.
+export function statusLine(list: TaskList | null, isHidden: boolean): string | undefined {
+  if (list === null || isHidden) {
+    return undefined
+  }
+
+  const next = nextIndex(list)
+  const total = list.tasks.length
+
+  if (next === -1) {
+    return `✅ 할 일 ${total}/${total} 완료 · /todo clear`
+  }
+
+  const text = list.tasks[next]?.text.replace(/\s+/g, ' ') ?? ''
+  const short = text.length > 100 ? `${text.slice(0, 99)}…` : text
+
+  return `📋 다음 할 일 ${next + 1}/${total}: ${short}`
+}
+
 // The list as the model reads it back after each change.
 export function describe(list: TaskList): string {
   const next = nextIndex(list)

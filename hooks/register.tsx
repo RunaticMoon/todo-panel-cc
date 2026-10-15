@@ -1,7 +1,8 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { Elements, EngineInterface, Register } from 'claude-code'
 
-import { describe, doneCount, markTasks, nextIndex, parseJsonObject, parseTasks, toIndexes } from './tasks'
+import type { TaskList } from '../types'
+import { describe, doneCount, markTasks, nextIndex, parseJsonObject, parseTasks, statusLine, toIndexes } from './tasks'
 
 const list = atom({ plugin: 'todo-panel', key: 'list' } as const, null)
 const isExpanded = atom({ plugin: 'todo-panel', key: 'isExpanded' } as const, false)
@@ -9,6 +10,7 @@ const isHidden = atom({ plugin: 'todo-panel', key: 'isHidden' } as const, false)
 
 const SET_TOOL = 'mcp__todo-panel__set_user_tasks'
 const MARK_TOOL = 'mcp__todo-panel__mark_user_tasks'
+const PANE = 'todo-panel'
 
 const TASK_SCHEMA = {
   type: 'object',
@@ -47,6 +49,10 @@ The user sees a panel pinned above the prompt that shows the next step THEY must
 - The user can also tick steps in the panel or with /todo; each tool result shows the list as it stands.
 - When the user says they finished, skipped or undid steps, call ${MARK_TOOL} with their 1-based numbers. When the whole procedure is over or replaced, mark it or clear it.`
 
+// Set once this plugin's band hook runs. Another plugin that draws the band without passing it
+// on (or a surface with no band) leaves it false, and the list goes to a pane instead.
+let isBandSeen = false
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.tool.register({
@@ -63,10 +69,11 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'todo',
-      description: 'User task panel: toggle the full list, or done/undo <n>, scan, show, hide, clear',
-      argumentHint: '[done [n] | undo <n> | scan | show | hide | clear]',
+      description: 'User task panel: toggle the full list, or done/undo <n>, scan, pane, show, hide, clear',
+      argumentHint: '[done [n] | undo <n> | scan | pane | show | hide | clear]',
       immediate: true,
     })
+    await syncStatus($)
 
     return next(e)
   })
@@ -84,9 +91,7 @@ export const register: Register = on => {
       return { result: 'No task had text; nothing was pinned.' }
     }
 
-    await update($, list, () => parsed)
-    await update($, isHidden, () => false)
-    await update($, isExpanded, () => false)
+    await pin($, parsed, false)
 
     return { result: `Pinned. ${describe(parsed)}` }
   })
@@ -95,12 +100,12 @@ export const register: Register = on => {
     const input = e as unknown as Record<string, unknown>
 
     if (input.clear === true) {
-      await update($, list, () => null)
+      await changeList($, () => null)
       return { result: 'The task list was cleared.' }
     }
 
     let isChanged = false
-    const changed = await update($, list, l => {
+    const changed = await changeList($, l => {
       if (l === null) {
         return l
       }
@@ -124,16 +129,23 @@ export const register: Register = on => {
     const current = await read($, list)
 
     if (verb === 'scan') {
-      return scan($)
+      const found = await scan($)
+
+      if (found.list !== undefined) {
+        await pin($, found.list, true)
+      }
+
+      return found.answer
     }
 
     if (verb === 'clear') {
-      await update($, list, () => null)
+      await changeList($, () => null)
       return { text: '할 일 목록을 지웠습니다.' }
     }
 
     if (verb === 'hide') {
       await update($, isHidden, () => true)
+      await syncStatus($)
       return { text: '할 일 패널을 숨겼습니다. /todo show 로 다시 엽니다.' }
     }
 
@@ -151,7 +163,7 @@ export const register: Register = on => {
         return { text: isDone ? '완료할 항목이 없습니다.' : '사용법: /todo undo <번호>' }
       }
 
-      const changed = await update($, list, l => (l === null ? l : markTasks(l, toIndexes(numbers, l.tasks.length), isDone)))
+      const changed = await changeList($, l => (l === null ? l : markTasks(l, toIndexes(numbers, l.tasks.length), isDone)))
 
       if (changed === null) {
         return { text: '고정된 할 일이 없습니다.' }
@@ -165,130 +177,217 @@ export const register: Register = on => {
       }
     }
 
+    await update($, isHidden, () => false)
+    await syncStatus($)
+
+    if (verb === 'pane' || !isBandSeen) {
+      await openPane($, true)
+      return { text: '할 일 패널을 열었습니다.' }
+    }
+
     if (verb === 'show') {
-      await update($, isHidden, () => false)
       await update($, isExpanded, () => true)
       return { text: '할 일 패널을 펼쳤습니다.' }
     }
 
-    await update($, isHidden, () => false)
     const isNowExpanded = await update($, isExpanded, open => !open)
 
     return { text: isNowExpanded ? '전체 할 일을 펼쳤습니다.' : '다음 할 일만 보여줍니다.' }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    isBandSeen = true
     const current = await read($, list)
 
     if (e.props.hasSurvey || current === null || (await read($, isHidden))) {
       return next(e)
     }
 
-    const { Box, Button, Text } = $.ui.resolve(e)
     const expanded = await read($, isExpanded)
-    const next_ = nextIndex(current)
-    const done = doneCount(current)
-    const total = current.tasks.length
-    const width = Math.max(20, e.props.bodyColumns)
+    const below = await next(e)
+    const elements = $.ui.resolve(e) as unknown as ListElements
+    const { Box } = elements
 
-    const toggle = (i: number) => update($, list, l => (l === null ? l : markTasks(l, [i], !l.tasks[i]?.isDone)))
-    // The next task is read again at press time, so two quick presses finish two tasks.
-    const finishNext = () =>
-      update($, list, l => {
-        const i = l === null ? -1 : nextIndex(l)
-        return l === null || i === -1 ? l : markTasks(l, [i], true)
-      })
-    const controls = (
-      <Box key="controls" flexDirection="row" gap={1}>
-        {next_ !== -1 && <Button key="done" hotkey="d" label="✓ 완료" onPress={finishNext} />}
-        <Button key="expand" hotkey="a" label={expanded ? '접기' : `전체 (${total})`} onPress={() => update($, isExpanded, open => !open)} />
-        {next_ === -1 && <Button key="clear" hotkey="c" label="지우기" onPress={() => update($, list, () => null)} />}
-        <Button key="hide" hotkey="h" label="숨기기" onPress={() => update($, isHidden, () => true)} />
-      </Box>
-    )
-
-    const header = (
-      <Box key="header">
-        <Text wrap="truncate-end">
-          <Text color="claude" bold>{next_ === -1 ? '✅ 할 일 완료' : '📋 다음 할 일'}</Text>
-          <Text dimColor> {done}/{total} · {current.title}</Text>
-        </Text>
-      </Box>
-    )
-
-    if (!expanded) {
-      const task = next_ === -1 ? undefined : current.tasks[next_]
-
-      return (
-        <Box flexDirection="column" width={width}>
-          {header}
-          {task !== undefined && (
-            <Box key="next">
-              <Text>
-                <Text bold>{next_ + 1}. </Text>
-                {task.group && <Text dimColor>[{task.group}] </Text>}
-                {task.text}
-              </Text>
-            </Box>
-          )}
-          {controls}
+    // Whatever the plugins beneath draw in the band stays, under the list. The engine refuses its
+    // own node under a Box given a width, so the width goes on the list alone.
+    return (
+      <Box flexDirection="column">
+        <Box key="sized" width={Math.max(20, e.props.bodyColumns)}>
+          {drawList($, elements, current, { expanded, canExpand: true })}
         </Box>
-      )
+        {below}
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const current = await read($, list)
+    const elements = $.ui.resolve(e) as unknown as ListElements
+    const { Box, Text } = elements
+
+    if (current === null) {
+      return <Text dimColor>고정된 할 일이 없습니다. /todo scan 으로 최근 응답에서 찾아볼 수 있습니다.</Text>
     }
 
-    const rows: JSX.Element[] = []
-    let group: string | undefined
-
-    current.tasks.forEach((task, i) => {
-      if (task.group !== undefined && task.group !== group) {
-        rows.push(<Box key={`g${i}`}><Text bold dimColor>{task.group}</Text></Box>)
-      }
-
-      group = task.group
-      const mark = task.isDone ? '✓' : i === next_ ? '▶' : '○'
-
-      rows.push(
-        <Button key={`t${i}`} plain onPress={() => toggle(i)}>
-          <Text color={i === next_ ? 'claude' : undefined} dimColor={task.isDone} strikethrough={task.isDone}>
-            {mark} {i + 1}. {task.text}
-          </Text>
-        </Button>,
-      )
-    })
-
     return (
-      <Box flexDirection="column" width={width}>
-        {header}
-        {rows}
-        {controls}
+      <Box flexDirection="column" width={Math.max(20, e.props.bodyColumns)}>
+        {drawList($, elements, current, { expanded: true, canExpand: false })}
       </Box>
     )
   })
 }
 
+type ListElements = Pick<Elements['terminal'], 'Box' | 'Button' | 'Text'>
+
+type DrawOptions = { expanded: boolean; canExpand: boolean }
+
+// The list as the band and the pane draw it: the next task, or every task when expanded.
+function drawList($: EngineInterface, { Box, Button, Text }: ListElements, current: TaskList, options: DrawOptions) {
+  const { expanded, canExpand } = options
+  const next_ = nextIndex(current)
+  const total = current.tasks.length
+
+  const toggle = (i: number) => changeList($, l => (l === null ? l : markTasks(l, [i], !l.tasks[i]?.isDone)))
+  // The next task is read again at press time, so two quick presses finish two tasks.
+  const finishNext = () =>
+    changeList($, l => {
+      const i = l === null ? -1 : nextIndex(l)
+      return l === null || i === -1 ? l : markTasks(l, [i], true)
+    })
+  const hide = async () => {
+    await update($, isHidden, () => true)
+    await syncStatus($)
+  }
+
+  const header = (
+    <Box key="header">
+      <Text wrap="truncate-end">
+        <Text color="claude" bold>{next_ === -1 ? '✅ 할 일 완료' : '📋 다음 할 일'}</Text>
+        <Text dimColor> {doneCount(current)}/{total} · {current.title}</Text>
+      </Text>
+    </Box>
+  )
+
+  const controls = (
+    <Box key="controls" flexDirection="row" gap={1}>
+      {next_ !== -1 && <Button key="done" hotkey="d" label="✓ 완료" onPress={finishNext} />}
+      {canExpand && <Button key="expand" hotkey="a" label={expanded ? '접기' : `전체 (${total})`} onPress={() => update($, isExpanded, open => !open)} />}
+      {next_ === -1 && <Button key="clear" hotkey="c" label="지우기" onPress={() => changeList($, () => null)} />}
+      {canExpand && <Button key="hide" hotkey="h" label="숨기기" onPress={hide} />}
+    </Box>
+  )
+
+  if (!expanded) {
+    const task = next_ === -1 ? undefined : current.tasks[next_]
+
+    return (
+      <Box key="list" flexDirection="column">
+        {header}
+        {task !== undefined && (
+          <Box key="next">
+            <Text>
+              <Text bold>{next_ + 1}. </Text>
+              {task.group && <Text dimColor>[{task.group}] </Text>}
+              {task.text}
+            </Text>
+          </Box>
+        )}
+        {controls}
+      </Box>
+    )
+  }
+
+  const rows: JSX.Element[] = []
+  let group: string | undefined
+
+  current.tasks.forEach((task, i) => {
+    if (task.group !== undefined && task.group !== group) {
+      rows.push(<Box key={`g${i}`}><Text bold dimColor>{task.group}</Text></Box>)
+    }
+
+    group = task.group
+    const mark = task.isDone ? '✓' : i === next_ ? '▶' : '○'
+
+    rows.push(
+      <Button key={`t${i}`} plain onPress={() => toggle(i)}>
+        <Text color={i === next_ ? 'claude' : undefined} dimColor={task.isDone} strikethrough={task.isDone}>
+          {mark} {i + 1}. {task.text}
+        </Text>
+      </Button>,
+    )
+  })
+
+  return (
+    <Box key="list" flexDirection="column">
+      {header}
+      {rows}
+      {controls}
+    </Box>
+  )
+}
+
+// Writes the list and keeps the status line, which no other plugin can cover, in step with it.
+async function changeList($: EngineInterface, change: (value: TaskList | null) => TaskList | null) {
+  const value = await update($, list, change)
+  await syncStatus($)
+  return value
+}
+
+async function pin($: EngineInterface, parsed: TaskList, isAsked: boolean) {
+  await update($, isHidden, () => false)
+  await update($, isExpanded, () => false)
+  await changeList($, () => parsed)
+  await openPane($, isAsked)
+}
+
+// Opens the pane where the band cannot show the list, or where the person asked for it.
+async function openPane($: EngineInterface, isAsked: boolean) {
+  if (isBandSeen && !isAsked) {
+    return
+  }
+
+  try {
+    await $.ui.open({ id: PANE, title: '할 일' })
+  } catch {
+    // No surface takes panes here; the status line still shows the next task.
+  }
+}
+
+// The status line under the prompt: the next task, kept beside the engine's own notices.
+async function syncStatus($: EngineInterface) {
+  const text = statusLine(await read($, list), await read($, isHidden))
+
+  try {
+    $.ui.status(text)
+  } catch {
+    // A session with no surface keeps no status line.
+  }
+}
+
 // Asks a fork of this conversation for the user's open steps, for a list the model never pinned.
-async function scan($: EngineInterface) {
+async function scan($: EngineInterface): Promise<{ answer: { text: string; context?: string[] }; list?: TaskList }> {
   const reply = await $.model.fork({
     prompt: 'Look at your recent replies in this conversation. List the steps you asked the USER to perform themselves (not your own work), in order, from the most recent such list. Answer with JSON only: {"title": string, "tasks": [{"text": string, "group"?: string, "done"?: boolean}]}, written in the user\'s language, "done": true for steps the user has already said they finished. Answer {"tasks": []} when there are none.',
   })
 
   if (!reply.isAnswered) {
-    return { text: `할 일을 찾지 못했습니다 (${reply.reason}).` }
+    return { answer: { text: `할 일을 찾지 못했습니다 (${reply.reason}).` } }
   }
 
   const parsed = parseTasks(parseJsonObject(reply.text) ?? {})
 
   if (parsed === undefined) {
-    return { text: '최근 응답에서 사용자가 할 일을 찾지 못했습니다.' }
+    return { answer: { text: '최근 응답에서 사용자가 할 일을 찾지 못했습니다.' } }
   }
 
-  await update($, list, () => parsed)
-  await update($, isHidden, () => false)
-  await update($, isExpanded, () => false)
+  const next = nextIndex(parsed)
+  const nextText = next === -1 ? '모두 완료' : `다음: ${next + 1}. ${parsed.tasks[next]?.text}`
 
   return {
-    text: `할 일 ${parsed.tasks.length}개를 고정했습니다.`,
-    context: [`The user pinned a task list found in your replies.\n${describe(parsed)}`],
+    answer: {
+      text: `할 일 ${parsed.tasks.length}개를 고정했습니다. ${nextText}`,
+      context: [`The user pinned a task list found in your replies.\n${describe(parsed)}`],
+    },
+    list: parsed,
   }
 }
-
