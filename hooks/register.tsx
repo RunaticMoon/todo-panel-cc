@@ -56,7 +56,7 @@ export const register: Register = on => {
     })
     await $.tool.register({
       name: 'mark_user_tasks',
-      description: 'Marks steps of the pinned user task list as done or not done (1-based numbers), or clears the list. Call it when the user says they finished, skipped or undid steps.',
+      description: 'Marks steps of the pinned user task list as done or not done (1-based numbers), or clears the list. Call it when the user says they finished, undid or chose to skip steps.',
       inputSchema: MARK_SCHEMA,
       isDeferred: false,
     })
