@@ -1,6 +1,8 @@
 import type { On, RenderElement } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
+import { register } from './register'
+
 // Stands for the engine's own empty band beneath the plugin.
 const engineBand = (on: On) =>
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
@@ -108,17 +110,19 @@ test('mark ignores numbers that name no task', async $ => {
   expect(String(undone.result)).toContain('1/3 done')
 })
 
-test('the guidance is one static session section at the end', async ($, on) => {
-  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'engine', scope: 'shared' }] }))
-  const before = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] })
-  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
-  const after = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] })
-  const last = after.sections[after.sections.length - 1]
+test('the register adds no prompt-modifying hooks', () => {
+  const events: string[] = []
+  const fakeOn = ((event: string) => {
+    events.push(event)
+  }) as unknown as On
 
-  expect(last?.id).toBe('todo-panel:guidance')
-  expect(last?.scope).toBe('session')
-  expect(after.sections[0]?.id).toBe('intro')
-  expect(after.sections).toEqual(before.sections)
+  register(fakeOn)
+
+  const guarded = ['prompt.compose', 'prompt.section', 'prompt.context', 'prompt.attachment', 'session.append']
+  expect(events.filter(name => guarded.includes(name) || name.startsWith('classic.'))).toEqual([])
+  for (const name of ['session.start', 'tool.call', 'command.run', 'ui.render']) {
+    expect(events).toContain(name)
+  }
 })
 
 test('a band another plugin holds sends the list to a pane and the status line', async ($, on) => {

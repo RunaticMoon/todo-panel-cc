@@ -24,7 +24,7 @@ When todo-panel is the one above, it keeps whatever the plugins beneath draw, un
 
 ## How the list gets there
 
-The mod adds a short, static section to the system prompt and two tools:
+The mod adds a short, static note to the session through a SessionStart hook, so it is there at every startup, resume, clear and compact, plus two tools:
 
 - `set_user_tasks`: Claude calls it when its reply gives you two or more steps to do yourself.
 - `mark_user_tasks`: Claude calls it when you say you finished (or undid) a step, e.g. "#100 머지했어".
