@@ -42,13 +42,6 @@ const MARK_SCHEMA = {
   },
 }
 
-const GUIDANCE = `# User task panel (todo-panel mod)
-The user sees a panel pinned above the prompt that shows the next step THEY must do themselves. Older replies scroll out of view, so this panel is how they keep track.
-- When your reply hands the user a list of two or more actions to perform themselves (manual steps, PR reviews/merges, checks in a web UI, commands only they can run, approvals), call ${SET_TOOL} in the same turn with every step, in order, in the user's language, grouped by your section headings. It replaces the previous list.
-- Do not use it for your own work plan (that is TodoWrite) or for optional suggestions.
-- The user can also tick steps in the panel or with /todo; each tool result shows the list as it stands.
-- When the user says they finished, skipped or undid steps, call ${MARK_TOOL} with their 1-based numbers. When the whole procedure is over or replaced, mark it or clear it.`
-
 // Set once this plugin's band hook runs. Another plugin that draws the band without passing it
 // on (or a surface with no band) leaves it false, and the list goes to a pane instead.
 let isBandSeen = false
@@ -57,13 +50,13 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.tool.register({
       name: 'set_user_tasks',
-      description: 'Pins the steps the user must do themselves in a panel above their prompt, replacing any previous list. Call it whenever your reply gives the user a multi-step list of actions to perform.',
+      description: 'Pins the steps the user must do themselves in a panel above their prompt, replacing any previous list. Call it whenever your reply gives the user a multi-step list of actions to perform. Only steps the user performs themselves; never your own work plan (that is TodoWrite) or optional suggestions.',
       inputSchema: TASK_SCHEMA,
       isDeferred: false,
     })
     await $.tool.register({
       name: 'mark_user_tasks',
-      description: 'Marks steps of the pinned user task list as done or not done (1-based numbers), or clears the list.',
+      description: 'Marks steps of the pinned user task list as done or not done (1-based numbers), or clears the list. Call it when the user says they finished, undid or chose to skip steps.',
       inputSchema: MARK_SCHEMA,
       isDeferred: false,
     })
@@ -76,12 +69,6 @@ export const register: Register = on => {
     await syncStatus($)
 
     return next(e)
-  })
-
-  on('prompt.compose', async ($, e, next) => {
-    const composed = await next(e)
-
-    return { sections: [...composed.sections, { id: 'todo-panel:guidance', text: GUIDANCE, scope: 'session' }] }
   })
 
   on('tool.call', { tool: SET_TOOL }, async ($, e) => {
