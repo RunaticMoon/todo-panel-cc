@@ -33,6 +33,12 @@ The list itself never goes into the system prompt, so changing it does not inval
 
 If Claude did not pin a list, `/todo scan` asks a fork of the conversation to find the latest one.
 
+Scanning the same steps again keeps the panel's checked and unchecked states. Steps
+match only when their count, order, text and groups are unchanged (the title may
+change). Other lists replace the current one. If you change or clear the list, or
+start another scan while one is pending, its late result is skipped with a retry
+message instead of overwriting your work.
+
 ## Commands
 
 | Command | What it does |

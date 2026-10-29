@@ -2,11 +2,11 @@ import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, Register } from 'claude-code'
 
 import type { TaskList } from '../types'
-import { describe, doneCount, markTasks, nextIndex, parseJsonObject, parseTasks, statusLine, toIndexes } from './tasks'
+import { describe, doneCount, markTasks, nextIndex, parseJsonObject, parseTasks, preserveProgress, statusLine, toIndexes } from './tasks'
 
-const list = atom({ plugin: 'todo-panel', key: 'list' } as const, null)
-const isExpanded = atom({ plugin: 'todo-panel', key: 'isExpanded' } as const, false)
-const isHidden = atom({ plugin: 'todo-panel', key: 'isHidden' } as const, false)
+const panel = atom({ plugin: 'todo-panel', key: 'panel' } as const, {
+  list: null, revision: 0, scanId: 0, isExpanded: false, isHidden: false,
+})
 
 const SET_TOOL = 'mcp__todo-panel__set_user_tasks'
 const MARK_TOOL = 'mcp__todo-panel__mark_user_tasks'
@@ -48,6 +48,7 @@ let isBandSeen = false
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    await migratePanel($)
     await $.tool.register({
       name: 'set_user_tasks',
       description: 'Pins the steps the user must do themselves in a panel above their prompt, replacing any previous list. Call it whenever your reply gives the user a multi-step list of actions to perform. Only steps the user performs themselves; never your own work plan (that is TodoWrite) or optional suggestions.',
@@ -113,17 +114,12 @@ export const register: Register = on => {
 
   on('command.run', { command: 'todo' }, async ($, e) => {
     const [verb = '', ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
-    const current = await read($, list)
 
     if (verb === 'scan') {
-      const found = await scan($)
-
-      if (found.list !== undefined) {
-        await pin($, found.list, true)
-      }
-
-      return found.answer
+      return scan($)
     }
+
+    const current = (await read($, panel)).list
 
     if (verb === 'clear') {
       await changeList($, () => null)
@@ -136,7 +132,7 @@ export const register: Register = on => {
     }
 
     if (verb === 'hide') {
-      await update($, isHidden, () => true)
+      await update($, panel, state => ({ ...state, isHidden: true }))
       await syncStatus($)
       return { text: '할 일 패널을 숨겼습니다. /todo show 로 다시 엽니다.' }
     }
@@ -169,7 +165,7 @@ export const register: Register = on => {
       }
     }
 
-    await update($, isHidden, () => false)
+    await update($, panel, state => ({ ...state, isHidden: false }))
     await syncStatus($)
 
     if (verb === 'pane' || !isBandSeen) {
@@ -178,24 +174,23 @@ export const register: Register = on => {
     }
 
     if (verb === 'show') {
-      await update($, isExpanded, () => true)
+      await update($, panel, state => ({ ...state, isExpanded: true }))
       return { text: '할 일 패널을 펼쳤습니다.' }
     }
 
-    const isNowExpanded = await update($, isExpanded, open => !open)
+    const { isExpanded: isNowExpanded } = await update($, panel, state => ({ ...state, isExpanded: !state.isExpanded }))
 
     return { text: isNowExpanded ? '전체 할 일을 펼쳤습니다.' : '다음 할 일만 보여줍니다.' }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     isBandSeen = true
-    const current = await read($, list)
+    const { list: current, isHidden, isExpanded: expanded } = await read($, panel)
 
-    if (e.props.hasSurvey || current === null || (await read($, isHidden))) {
+    if (e.props.hasSurvey || current === null || isHidden) {
       return next(e)
     }
 
-    const expanded = await read($, isExpanded)
     const below = await next(e)
     const elements = $.ui.resolve(e) as unknown as ListElements
     const { Box } = elements
@@ -213,7 +208,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const current = await read($, list)
+    const current = (await read($, panel)).list
     const elements = $.ui.resolve(e) as unknown as ListElements
     const { Box, Button, Text } = elements
 
@@ -252,7 +247,7 @@ function drawList($: EngineInterface, { Box, Button, Text }: ListElements, curre
       return l === null || i === -1 ? l : markTasks(l, [i], true)
     })
   const hide = async () => {
-    await update($, isHidden, () => true)
+    await update($, panel, state => ({ ...state, isHidden: true }))
     await syncStatus($)
   }
 
@@ -268,7 +263,7 @@ function drawList($: EngineInterface, { Box, Button, Text }: ListElements, curre
   const controls = (
     <Box key="controls" flexDirection="row" gap={1}>
       {next_ !== -1 && <Button key="done" hotkey="d" label="✓ 완료" onPress={finishNext} />}
-      {canExpand && <Button key="expand" hotkey="a" label={expanded ? '접기' : `전체 (${total})`} onPress={() => update($, isExpanded, open => !open)} />}
+      {canExpand && <Button key="expand" hotkey="a" label={expanded ? '접기' : `전체 (${total})`} onPress={() => update($, panel, state => ({ ...state, isExpanded: !state.isExpanded }))} />}
       {next_ === -1 && <Button key="clear" hotkey="c" label="지우기" onPress={() => changeList($, () => null)} />}
       {canExpand && <Button key="hide" hotkey="h" label="숨기기" onPress={hide} />}
       {canClose && <Button key="close" hotkey="q" role="dismiss" label="닫기" onPress={() => closePane($)} />}
@@ -324,17 +319,32 @@ function drawList($: EngineInterface, { Box, Button, Text }: ListElements, curre
   )
 }
 
-// Writes the list and keeps the status line, which no other plugin can cover, in step with it.
+// Preserve the old atoms once when an existing session reloads the updated plugin.
+// The raw reference lets update distinguish an unwritten panel from its default.
+async function migratePanel($: EngineInterface) {
+  const oldList = await read($, { plugin: 'todo-panel', key: 'list' } as const)
+  const oldHidden = await read($, { plugin: 'todo-panel', key: 'isHidden' } as const)
+  const oldExpanded = await read($, { plugin: 'todo-panel', key: 'isExpanded' } as const)
+  await update($, { plugin: 'todo-panel', key: 'panel' } as const, state => state ?? {
+    ...panel.initial, list: oldList ?? null, isHidden: oldHidden ?? false, isExpanded: oldExpanded ?? false,
+  })
+}
+
+// Even clearing an empty list invalidates a pending scan that could restore it.
+// Keep the status line, which no other plugin can cover, in step with each write.
 async function changeList($: EngineInterface, change: (value: TaskList | null) => TaskList | null) {
-  const value = await update($, list, change)
+  const state = await update($, panel, current => ({
+    ...current, list: change(current.list), revision: current.revision + 1,
+  }))
   await syncStatus($)
-  return value
+  return state.list
 }
 
 async function pin($: EngineInterface, parsed: TaskList, isAsked: boolean) {
-  await update($, isHidden, () => false)
-  await update($, isExpanded, () => false)
-  await changeList($, () => parsed)
+  await update($, panel, state => ({
+    ...state, list: parsed, revision: state.revision + 1, isHidden: false, isExpanded: false,
+  }))
+  await syncStatus($)
   await openPane($, isAsked)
 }
 
@@ -361,7 +371,8 @@ async function closePane($: EngineInterface) {
 
 // The status line under the prompt: the next task, kept beside the engine's own notices.
 async function syncStatus($: EngineInterface) {
-  const text = statusLine(await read($, list), await read($, isHidden))
+  const state = await read($, panel)
+  const text = statusLine(state.list, state.isHidden)
 
   try {
     $.ui.status(text)
@@ -371,29 +382,52 @@ async function syncStatus($: EngineInterface) {
 }
 
 // Asks a fork of this conversation for the user's open steps, for a list the model never pinned.
-async function scan($: EngineInterface): Promise<{ answer: { text: string; context?: string[] }; list?: TaskList }> {
+async function scan($: EngineInterface): Promise<{ text: string; context?: string[] }> {
+  // Starting a newer request invalidates earlier ones even if it finds no tasks.
+  const started = await update($, panel, state => ({ ...state, scanId: state.scanId + 1 }))
   const reply = await $.model.fork({
     prompt: 'Look at your recent replies in this conversation. List the steps you asked the USER to perform themselves (not your own work), in order, from the most recent such list. Answer with JSON only: {"title": string, "tasks": [{"text": string, "group"?: string, "done"?: boolean}]}, written in the user\'s language, "done": true for steps the user has already said they finished. Answer {"tasks": []} when there are none.',
   })
 
   if (!reply.isAnswered) {
-    return { answer: { text: `할 일을 찾지 못했습니다 (${reply.reason}).` } }
+    return { text: `할 일을 찾지 못했습니다 (${reply.reason}).` }
   }
 
   const parsed = parseTasks(parseJsonObject(reply.text) ?? {})
 
   if (parsed === undefined) {
-    return { answer: { text: '최근 응답에서 사용자가 할 일을 찾지 못했습니다.' } }
+    return { text: '최근 응답에서 사용자가 할 일을 찾지 못했습니다.' }
   }
 
-  const next = nextIndex(parsed)
-  const nextText = next === -1 ? '모두 완료' : `다음: ${next + 1}. ${parsed.tasks[next]?.text}`
+  // Validate and commit in one update so a concurrent clear/mark/pin cannot slip between them.
+  let isApplied = false
+  const applied = await update($, panel, state => {
+    isApplied = false
+    if (state.revision !== started.revision || state.scanId !== started.scanId) {
+      return state
+    }
+
+    isApplied = true
+    return {
+      ...state,
+      list: preserveProgress(state.list, parsed),
+      revision: state.revision + 1,
+      isHidden: false,
+      isExpanded: false,
+    }
+  })
+
+  if (!isApplied || applied.list === null) {
+    return { text: '스캔 중 목록이 변경되었거나 새 스캔이 시작되어 결과를 적용하지 않았습니다. /todo scan 으로 다시 시도해 주세요.' }
+  }
+
+  await syncStatus($)
+  await openPane($, true)
+  const next = nextIndex(applied.list)
+  const nextText = next === -1 ? '모두 완료' : `다음: ${next + 1}. ${applied.list.tasks[next]?.text}`
 
   return {
-    answer: {
-      text: `할 일 ${parsed.tasks.length}개를 고정했습니다. ${nextText}`,
-      context: [`The user pinned a task list found in your replies.\n${describe(parsed)}`],
-    },
-    list: parsed,
+    text: `할 일 ${applied.list.tasks.length}개를 고정했습니다. ${nextText}`,
+    context: [`The user pinned a task list found in your replies.\n${describe(applied.list)}`],
   }
 }
