@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { parseJsonObject, parseTasks, statusLine, toIndexes } from './tasks'
+import { parseJsonObject, parseTasks, preserveProgress, statusLine, toIndexes } from './tasks'
 
 test('toIndexes takes numbers and digit strings only', async () => {
   expect(toIndexes([1, '2', true, null, 0, 9, 1.5, ' 3 '], 3)).toEqual([0, 1, 2])
@@ -28,4 +28,21 @@ test('statusLine names the next task, or says all are done', async () => {
   expect(statusLine(list, true)).toBeUndefined()
   expect(statusLine(null, false)).toBeUndefined()
   expect(statusLine({ ...list, tasks: list.tasks.map(t => ({ ...t, isDone: true })) }, false)).toContain('2/2 완료')
+})
+
+test('scan preserves progress only for a complete ordered match, including groups', () => {
+  const current = parseTasks({ title: 'old', tasks: [{ text: 'a', group: 'g', done: true }, { text: 'a', group: 'h' }] })!
+  const renamed = parseTasks({ title: 'new', tasks: [{ text: 'a', group: 'g' }, { text: 'a', group: 'h', done: true }] })!
+  expect(preserveProgress(current, renamed)).toEqual({ ...renamed, tasks: current.tasks })
+
+  for (const scanned of [
+    parseTasks({ tasks: ['a'] })!,
+    parseTasks({ tasks: ['a', 'a'] })!,
+    parseTasks({ tasks: [{ text: 'changed', group: 'g' }, { text: 'a', group: 'h' }] })!,
+    { ...renamed, tasks: [...renamed.tasks].reverse() },
+    { ...renamed, tasks: [...renamed.tasks, { text: 'new', isDone: false }] },
+  ]) {
+    expect(preserveProgress(current, scanned)).toEqual(scanned)
+  }
+  expect(preserveProgress(null, renamed)).toEqual(renamed)
 })

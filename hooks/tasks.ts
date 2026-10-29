@@ -47,6 +47,17 @@ export function markTasks(list: TaskList, indexes: number[], isDone: boolean): T
   }
 }
 
+// With no stable IDs, only a complete ordered match is safe to reuse. A renamed
+// heading still describes the same steps; never guess matches for changed steps.
+export function preserveProgress(current: TaskList | null, scanned: TaskList): TaskList {
+  if (current === null || current.tasks.length !== scanned.tasks.length ||
+    !current.tasks.every((task, i) => task.text === scanned.tasks[i]?.text && task.group === scanned.tasks[i]?.group)) {
+    return scanned
+  }
+
+  return { ...scanned, tasks: current.tasks }
+}
+
 export function nextIndex(list: TaskList): number {
   return list.tasks.findIndex(task => !task.isDone)
 }
