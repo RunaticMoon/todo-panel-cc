@@ -47,6 +47,33 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+// Holds the next panel read after it takes its snapshot, so a test can change the
+// list between the command's read and the write it chooses from.
+function panelReadGate(on: On) {
+  let armed = false
+  let reached = deferred<void>()
+  let release = deferred<void>()
+
+  on('state.get', { plugin: 'todo-panel', key: 'panel' }, async (_, e, next) => {
+    const read = await next(e)
+    if (armed) {
+      armed = false
+      reached.resolve()
+      await release.promise
+    }
+    return read
+  })
+
+  return {
+    arm() {
+      armed = true
+      reached = deferred<void>()
+      release = deferred<void>()
+      return { reached: reached.promise, release: () => release.resolve() }
+    },
+  }
+}
+
 test('pinned tasks show the next one and advance as they are done', async ($, on) => {
   engineBand(on)
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -109,6 +136,142 @@ test('two quick presses of done finish two tasks', async ($, on) => {
   const ui = await $.ui.mount({ plugin: 'todo-panel', surface: 'terminal', ...BAND })
 
   await Promise.all([ui.press({ key: 'done' }), ui.press({ key: 'done' })])
+  expect((await ui.find({ key: 'header' }))?.text).toContain('2/3')
+  await ui.unmount()
+})
+
+test('/todo done finishes the next task when another run got there first', async ($, on) => {
+  engineBand(on)
+  const gate = panelReadGate(on)
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+
+  const pause = gate.arm()
+  const older = $.command.run(todo('done'))
+  await pause.reached
+
+  const newer = await $.command.run(todo('done'))
+  expect(newer.text).toContain('1번')
+
+  pause.release()
+  const answer = await older
+
+  expect(answer.text).toBe('2번을 완료로 표시했습니다.')
+  expect(answer.context?.[0]).toContain('tasks 2 of')
+
+  const ui = await $.ui.mount({ plugin: 'todo-panel', surface: 'terminal', ...BAND })
+  expect((await ui.find({ key: 'header' }))?.text).toContain('2/3')
+  await ui.unmount()
+})
+
+test('/todo done follows a UI press made while it was choosing', async ($, on) => {
+  engineBand(on)
+  const gate = panelReadGate(on)
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  const ui = await $.ui.mount({ plugin: 'todo-panel', surface: 'terminal', ...BAND })
+
+  const pause = gate.arm()
+  const pending = $.command.run(todo('done'))
+  await pause.reached
+  await ui.press({ key: 'done' })
+  pause.release()
+  const answer = await pending
+
+  expect(answer.text).toBe('2번을 완료로 표시했습니다.')
+  expect(answer.context?.[0]).toContain('tasks 2 of')
+  expect((await ui.find({ key: 'header' }))?.text).toContain('2/3')
+  await ui.unmount()
+})
+
+test('/todo done says there is nothing left when the list filled up meanwhile', async ($, on) => {
+  engineBand(on)
+  const gate = panelReadGate(on)
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+
+  const pause = gate.arm()
+  const pending = $.command.run(todo('done'))
+  await pause.reached
+  await $.tool.call({ tool: 'mcp__todo-panel__mark_user_tasks', done: [1, 2, 3] })
+  pause.release()
+  const answer = await pending
+
+  expect(answer.text).toBe('완료할 항목이 없습니다.')
+  expect(answer.context ?? []).toEqual([])
+})
+
+test('/todo done answers no list when the list was cleared while it was choosing', async ($, on) => {
+  engineBand(on)
+  const gate = panelReadGate(on)
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+
+  const pause = gate.arm()
+  const pending = $.command.run(todo('done'))
+  await pause.reached
+  await $.command.run(todo('clear'))
+  pause.release()
+  const answer = await pending
+
+  expect(answer.text).toBe('고정된 할 일이 없습니다.')
+  expect(answer.context ?? []).toEqual([])
+
+  const ui = await $.ui.mount({ plugin: 'todo-panel', surface: 'terminal', ...BAND })
+  expect(await ui.find({ key: 'header' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('/todo done does not apply a numbered target to a shorter list', async ($, on) => {
+  engineBand(on)
+  const gate = panelReadGate(on)
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  const ui = await $.ui.mount({ plugin: 'todo-panel', surface: 'terminal', ...BAND })
+
+  const pause = gate.arm()
+  const pending = $.command.run(todo('done 3'))
+  await pause.reached
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', title: '새 작업', tasks: [{ text: '새 작업을 진행합니다.' }] })
+  pause.release()
+  const answer = await pending
+
+  expect(answer.text).toBe('목록이 바뀌어 적용하지 않았습니다. 목록을 확인하고 다시 시도해 주세요.')
+  expect(answer.context ?? []).toEqual([])
+  expect((await ui.find({ key: 'header' }))?.text).toContain('0/1')
+  expect((await ui.find({ key: 'header' }))?.text).toContain('새 작업')
+  await ui.unmount()
+})
+
+test('/todo done does not apply a numbered target to another list of the same size', async ($, on) => {
+  engineBand(on)
+  const gate = panelReadGate(on)
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  const ui = await $.ui.mount({ plugin: 'todo-panel', surface: 'terminal', ...BAND })
+
+  const pause = gate.arm()
+  const pending = $.command.run(todo('done 2'))
+  await pause.reached
+  await $.tool.call({
+    tool: 'mcp__todo-panel__set_user_tasks',
+    title: '다른 작업',
+    tasks: [{ text: '첫 번째 작업입니다.' }, { text: '두 번째 작업입니다.' }, { text: '세 번째 작업입니다.' }],
+  })
+  pause.release()
+  const answer = await pending
+
+  expect(answer.text).toBe('목록이 바뀌어 적용하지 않았습니다. 목록을 확인하고 다시 시도해 주세요.')
+  expect(answer.context ?? []).toEqual([])
+  expect((await ui.find({ key: 'header' }))?.text).toContain('0/3')
+  await ui.unmount()
+})
+
+test('/todo done names every task it marked', async ($, on) => {
+  engineBand(on)
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+
+  const answer = await $.command.run(todo('done 1 2'))
+
+  expect(answer.text).toBe('1, 2번을 완료로 표시했습니다.')
+  expect(answer.context?.[0]).toContain('tasks 1, 2 of')
+  expect(answer.context?.[0]).toContain('2/3 done')
+
+  const ui = await $.ui.mount({ plugin: 'todo-panel', surface: 'terminal', ...BAND })
   expect((await ui.find({ key: 'header' }))?.text).toContain('2/3')
   await ui.unmount()
 })

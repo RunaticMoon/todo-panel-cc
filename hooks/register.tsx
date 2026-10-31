@@ -5,7 +5,7 @@ import type { TaskList } from '../types'
 import { describe, doneCount, markTasks, nextIndex, parseJsonObject, parseTasks, preserveProgress, statusLine, toIndexes } from './tasks'
 
 const panel = atom({ plugin: 'todo-panel', key: 'panel' } as const, {
-  list: null, revision: 0, scanId: 0, isExpanded: false, isHidden: false,
+  list: null, listId: 0, revision: 0, scanId: 0, isExpanded: false, isHidden: false,
 })
 
 const SET_TOOL = 'mcp__todo-panel__set_user_tasks'
@@ -88,7 +88,7 @@ export const register: Register = on => {
     const input = e as unknown as Record<string, unknown>
 
     if (input.clear === true) {
-      await changeList($, () => null)
+      await clearList($)
       return { result: 'The task list was cleared.' }
     }
 
@@ -119,10 +119,10 @@ export const register: Register = on => {
       return scan($)
     }
 
-    const current = (await read($, panel)).list
+    const { list: current, listId = 0 } = await read($, panel)
 
     if (verb === 'clear') {
-      await changeList($, () => null)
+      await clearList($)
       return { text: '할 일 목록을 지웠습니다.' }
     }
 
@@ -143,26 +143,55 @@ export const register: Register = on => {
 
     if (verb === 'done' || verb === 'undo') {
       const isDone = verb === 'done'
-      const fallback = isDone ? nextIndex(current) + 1 : undefined
-      const numbers = rest.length > 0 ? rest : fallback ? [fallback] : []
-      const indexes = toIndexes(numbers, current.tasks.length)
+      const isNumbered = rest.length > 0
+      let text = ''
+      let context: string[] | undefined
+      let isApplied = false
 
-      if (indexes.length === 0) {
-        return { text: isDone ? '완료할 항목이 없습니다.' : '사용법: /todo undo <번호>' }
+      // Choose, validate, record the outcome and write in one update, so a change
+      // between the read above and this write cannot leave the reply stale.
+      await update($, panel, state => {
+        // `update` re-runs this on a version miss; every outcome starts over.
+        text = ''
+        context = undefined
+        isApplied = false
+
+        if (state.list === null) {
+          text = '고정된 할 일이 없습니다.'
+          return state
+        }
+
+        // A numbered target names the list it was read from; a re-pinned or
+        // replaced list is a different one even when its steps look the same.
+        if (isNumbered && (state.listId ?? 0) !== listId) {
+          text = '목록이 바뀌어 적용하지 않았습니다. 목록을 확인하고 다시 시도해 주세요.'
+          return state
+        }
+
+        const indexes = isNumbered
+          ? toIndexes(rest, state.list.tasks.length)
+          : isDone ? [nextIndex(state.list)].filter(i => i !== -1) : []
+
+        if (indexes.length === 0) {
+          text = isDone ? '완료할 항목이 없습니다.' : '사용법: /todo undo <번호>'
+          return state
+        }
+
+        const list = markTasks(state.list, indexes, isDone)
+        const label = indexes.map(i => i + 1).join(', ')
+
+        text = `${label}번을 ${isDone ? '완료' : '미완료'}로 표시했습니다.`
+        context = [`The user marked tasks ${label} of the pinned list as ${isDone ? 'done' : 'not done'}.\n${describe(list)}`]
+        isApplied = true
+
+        return { ...state, list, revision: state.revision + 1 }
+      })
+
+      if (isApplied) {
+        await syncStatus($)
       }
 
-      const changed = await changeList($, l => (l === null ? l : markTasks(l, toIndexes(numbers, l.tasks.length), isDone)))
-
-      if (changed === null) {
-        return { text: '고정된 할 일이 없습니다.' }
-      }
-
-      const label = indexes.map(i => i + 1).join(', ')
-
-      return {
-        text: `${label}번을 ${isDone ? '완료' : '미완료'}로 표시했습니다.`,
-        context: [`The user marked tasks ${label} of the pinned list as ${isDone ? 'done' : 'not done'}.\n${describe(changed)}`],
-      }
+      return context === undefined ? { text } : { text, context }
     }
 
     await update($, panel, state => ({ ...state, isHidden: false }))
@@ -264,7 +293,7 @@ function drawList($: EngineInterface, { Box, Button, Text }: ListElements, curre
     <Box key="controls" flexDirection="row" gap={1}>
       {next_ !== -1 && <Button key="done" hotkey="d" label="✓ 완료" onPress={finishNext} />}
       {canExpand && <Button key="expand" hotkey="a" label={expanded ? '접기' : `전체 (${total})`} onPress={() => update($, panel, state => ({ ...state, isExpanded: !state.isExpanded }))} />}
-      {next_ === -1 && <Button key="clear" hotkey="c" label="지우기" onPress={() => changeList($, () => null)} />}
+      {next_ === -1 && <Button key="clear" hotkey="c" label="지우기" onPress={() => clearList($)} />}
       {canExpand && <Button key="hide" hotkey="h" label="숨기기" onPress={hide} />}
       {canClose && <Button key="close" hotkey="q" role="dismiss" label="닫기" onPress={() => closePane($)} />}
     </Box>
@@ -330,7 +359,15 @@ async function migratePanel($: EngineInterface) {
   })
 }
 
-// Even clearing an empty list invalidates a pending scan that could restore it.
+// Clearing is a replacement too: a numbered target read from the old list must
+// not apply to whatever comes next. The revision bump also discards a pending scan.
+async function clearList($: EngineInterface) {
+  await update($, panel, current => ({
+    ...current, list: null, listId: (current.listId ?? 0) + 1, revision: current.revision + 1,
+  }))
+  await syncStatus($)
+}
+
 // Keep the status line, which no other plugin can cover, in step with each write.
 async function changeList($: EngineInterface, change: (value: TaskList | null) => TaskList | null) {
   const state = await update($, panel, current => ({
@@ -342,7 +379,7 @@ async function changeList($: EngineInterface, change: (value: TaskList | null) =
 
 async function pin($: EngineInterface, parsed: TaskList, isAsked: boolean) {
   await update($, panel, state => ({
-    ...state, list: parsed, revision: state.revision + 1, isHidden: false, isExpanded: false,
+    ...state, list: parsed, listId: (state.listId ?? 0) + 1, revision: state.revision + 1, isHidden: false, isExpanded: false,
   }))
   await syncStatus($)
   await openPane($, isAsked)
@@ -408,9 +445,13 @@ async function scan($: EngineInterface): Promise<{ text: string; context?: strin
     }
 
     isApplied = true
+    const list = preserveProgress(state.list, parsed)
+
     return {
       ...state,
-      list: preserveProgress(state.list, parsed),
+      list,
+      // The same steps kept are the same list; anything else starts a new generation.
+      listId: list.tasks === state.list?.tasks ? state.listId ?? 0 : (state.listId ?? 0) + 1,
       revision: state.revision + 1,
       isHidden: false,
       isExpanded: false,
