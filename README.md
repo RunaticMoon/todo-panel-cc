@@ -37,7 +37,8 @@ Scanning the same steps again keeps the panel's checked and unchecked states. St
 match only when their count, order, text and groups are unchanged (the title may
 change). Other lists replace the current one. If you change or clear the list, or
 start another scan while one is pending, its late result is skipped with a retry
-message instead of overwriting your work.
+message instead of overwriting your work. A numbered `/todo done` or `/todo undo`
+whose list changed since it read the numbers is skipped the same way.
 
 ## Commands
 
