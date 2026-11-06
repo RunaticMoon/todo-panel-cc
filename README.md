@@ -29,6 +29,14 @@ The mod adds a short, static note to the session through a SessionStart hook, so
 - `set_user_tasks`: Claude calls it when its reply gives you two or more steps to do yourself.
 - `mark_user_tasks`: Claude calls it when you say you finished (or undid) a step, e.g. "#100 머지했어".
 
+Tool results include a `listId` identifying the list generation. Send that value
+with `mark_user_tasks` when using task numbers. If the list was replaced or
+cleared, a stale generation is rejected without changing progress; the response
+includes the current list and generation for review before retrying. Marking or
+undoing steps does not change the generation. For compatibility, omitting
+`listId` retains the legacy behavior of applying numbers to the current list.
+`clear: true` always clears the list regardless of `listId`.
+
 The list itself never goes into the system prompt, so changing it does not invalidate the prompt cache.
 
 If Claude did not pin a list, `/todo scan` asks a fork of the conversation to find the latest one.
@@ -110,3 +118,4 @@ claude --plugin-dir /path/to/todo-panel-cc   # load it from this folder
 claude plugin validate .                      # check manifest and hooks
 claude plugin test .                          # run hooks/*.test.ts
 ```
+

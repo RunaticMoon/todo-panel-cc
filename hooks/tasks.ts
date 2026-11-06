@@ -86,14 +86,14 @@ export function statusLine(list: TaskList | null, isHidden: boolean): string | u
 }
 
 // The list as the model reads it back after each change.
-export function describe(list: TaskList): string {
+export function describe(list: TaskList, listId?: number): string {
   const next = nextIndex(list)
   const lines = list.tasks.map((task, i) => `${i + 1}. [${task.isDone ? 'x' : ' '}] ${task.group ? `(${task.group}) ` : ''}${task.text}`)
   const head = next === -1
     ? `All ${list.tasks.length} tasks of "${list.title}" are done.`
     : `"${list.title}": ${doneCount(list)}/${list.tasks.length} done; the panel shows task ${next + 1} as next.`
 
-  return [head, ...lines].join('\n')
+  return [...(listId === undefined ? [] : [`listId: ${listId}`]), head, ...lines].join('\n')
 }
 
 // Pulls the first JSON object out of a model reply that may wrap it in prose or a fence.
@@ -140,3 +140,4 @@ function parseBalanced(source: string, start: number): Record<string, unknown> |
 
   return undefined
 }
+
