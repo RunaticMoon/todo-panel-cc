@@ -597,3 +597,94 @@ test('only the latest scan may apply, even when it finds no list or fails', asyn
   }
   await ui.unmount()
 })
+
+
+const resultListId = (result: unknown) => {
+  const match = /listId: (\d+)/.exec(String(result))
+  expect(match).not.toBeNull()
+  return Number(match![1])
+}
+
+test('mark rejects stale numbers after replacement and returns the current generation', async $ => {
+  const first = await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  const listId = resultListId(first.result)
+  const replacement = await $.tool.call({
+    tool: 'mcp__todo-panel__set_user_tasks',
+    title: 'New list',
+    tasks: [{ text: 'New first step' }, { text: 'New second step', done: true }],
+  })
+  const currentId = resultListId(replacement.result)
+  expect(currentId).not.toBe(listId)
+
+  const rejected = await $.tool.call({ tool: 'mcp__todo-panel__mark_user_tasks', listId, done: [1], undone: [2] })
+  expect(String(rejected.result)).toContain('list changed')
+  expect(String(rejected.result)).toContain('1. [ ] New first step')
+  expect(String(rejected.result)).toContain('2. [x] New second step')
+  expect(resultListId(rejected.result)).toBe(currentId)
+
+  const marked = await $.tool.call({ tool: 'mcp__todo-panel__mark_user_tasks', listId: currentId, done: [1], undone: [2] })
+  expect(String(marked.result)).toContain('1. [x] New first step')
+  expect(String(marked.result)).toContain('2. [ ] New second step')
+  expect(resultListId(marked.result)).toBe(currentId)
+})
+
+test('mark checks the generation again when its atomic update retries', async ($, on) => {
+  const gate = panelReadGate(on)
+  const first = await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  const pause = gate.arm()
+  const pending = $.tool.call({ tool: 'mcp__todo-panel__mark_user_tasks', listId: resultListId(first.result), done: [1] })
+  await pause.reached
+  const replacement = await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  pause.release()
+  const rejected = await pending
+  expect(String(rejected.result)).toContain('list changed')
+  expect(String(rejected.result)).toContain('0/3 done')
+  expect(resultListId(rejected.result)).toBe(resultListId(replacement.result))
+})
+
+test('clear ignores a stale generation and invalidates earlier numbers even after repinning', async $ => {
+  const first = await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  const listId = resultListId(first.result)
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  const cleared = await $.tool.call({ tool: 'mcp__todo-panel__mark_user_tasks', clear: true, listId })
+  expect(String(cleared.result)).toContain('was cleared')
+  expect(resultListId(cleared.result)).not.toBe(listId)
+  const empty = await $.tool.call({ tool: 'mcp__todo-panel__mark_user_tasks', listId, done: [1] })
+  expect(String(empty.result)).toContain('list changed')
+  expect(String(empty.result)).toContain('No task list')
+
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  const rejected = await $.tool.call({ tool: 'mcp__todo-panel__mark_user_tasks', listId, done: [1] })
+  expect(String(rejected.result)).toContain('list changed')
+  expect(String(rejected.result)).toContain('0/3 done')
+})
+
+test('invalid generations cannot silently fall back to legacy marking', async $ => {
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  for (const listId of [null, '1', -1, 1.5, true]) {
+    const rejected = await $.tool.call({ tool: 'mcp__todo-panel__mark_user_tasks', listId, done: [1] })
+    expect(String(rejected.result)).toContain('Invalid listId')
+    expect(String(rejected.result)).toContain('0/3 done')
+  }
+  const legacy = await $.tool.call({ tool: 'mcp__todo-panel__mark_user_tasks', done: [1] })
+  expect(String(legacy.result)).toContain('1/3 done')
+  expect(resultListId(legacy.result)).toBeGreaterThan(0)
+})
+
+test('rejected generation does not invalidate a pending scan', async ($, on) => {
+  const started = deferred<void>()
+  const reply = deferred<string>()
+  on('model.fork', async () => {
+    started.resolve()
+    return { value: answered(await reply.promise) }
+  })
+  const first = await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  await $.tool.call({ tool: 'mcp__todo-panel__set_user_tasks', ...TASKS })
+  const pending = $.command.run(todo('scan'))
+  await started.promise
+  await $.tool.call({ tool: 'mcp__todo-panel__mark_user_tasks', listId: resultListId(first.result), done: [1] })
+  reply.resolve(JSON.stringify(TASKS))
+  const scanned = await pending
+  expect(scanned.text).toContain('고정했습니다')
+  expect(scanned.context?.[0]).toContain('listId:')
+})

@@ -36,6 +36,7 @@ const TASK_SCHEMA = {
 const MARK_SCHEMA = {
   type: 'object',
   properties: {
+    listId: { type: 'integer', minimum: 0, description: 'List generation from the result that supplied these task numbers. Always send it for done/undone; omitted values retain legacy unchecked behavior. Ignored for clear.' },
     done: { type: 'array', items: { type: 'integer' }, description: '1-based numbers of tasks the user finished' },
     undone: { type: 'array', items: { type: 'integer' }, description: '1-based numbers of tasks to reopen' },
     clear: { type: 'boolean', description: 'True to remove the whole list (the work is over or abandoned)' },
@@ -57,7 +58,7 @@ export const register: Register = on => {
     })
     await $.tool.register({
       name: 'mark_user_tasks',
-      description: 'Marks steps of the pinned user task list as done or not done (1-based numbers), or clears the list. Call it when the user says they finished, undid or chose to skip steps.',
+      description: 'Marks steps of the pinned user task list as done or not done (1-based numbers), or clears the list. Call it when the user says they finished, undid or chose to skip steps. Send the listId returned with the list whose numbers you use. A changed generation rejects the update; inspect the returned list before retrying. Omitting listId keeps legacy unchecked behavior.',
       inputSchema: MARK_SCHEMA,
       isDeferred: false,
     })
@@ -79,37 +80,56 @@ export const register: Register = on => {
       return { result: 'No task had text; nothing was pinned.' }
     }
 
-    await pin($, parsed, false)
+    const pinned = await pin($, parsed, false)
 
-    return { result: `Pinned. ${describe(parsed)}` }
+    return { result: `Pinned. ${describe(parsed, pinned.listId)}` }
   })
 
   on('tool.call', { tool: MARK_TOOL }, async ($, e) => {
     const input = e as unknown as Record<string, unknown>
 
     if (input.clear === true) {
-      await clearList($)
-      return { result: 'The task list was cleared.' }
+      const cleared = await clearList($)
+      return { result: `The task list was cleared.\nlistId: ${cleared.listId}` }
     }
 
     let isChanged = false
-    const changed = await changeList($, l => {
-      if (l === null) {
-        return l
+    let rejection = ''
+    const changed = await update($, panel, state => {
+      // A version miss reruns this callback; never retain an earlier outcome.
+      isChanged = false
+      rejection = ''
+      if (input.listId !== undefined) {
+        if (typeof input.listId !== 'number' || !Number.isSafeInteger(input.listId) || input.listId < 0) {
+          rejection = 'Invalid listId; nothing changed.'
+          return state
+        }
+        if (input.listId !== (state.listId ?? 0)) {
+          rejection = 'The task list changed; nothing was applied. Check the current list before retrying.'
+          return state
+        }
       }
+      if (state.list === null) return state
 
-      const done = toIndexes(input.done, l.tasks.length)
-      const undone = toIndexes(input.undone, l.tasks.length)
+      const done = toIndexes(input.done, state.list.tasks.length)
+      const undone = toIndexes(input.undone, state.list.tasks.length)
       isChanged = done.length + undone.length > 0
+      if (!isChanged) return state
 
-      return isChanged ? markTasks(markTasks(l, done, true), undone, false) : l
+      return {
+        ...state,
+        list: markTasks(markTasks(state.list, done, true), undone, false),
+        revision: state.revision + 1,
+      }
     })
 
-    if (changed === null) {
-      return { result: 'No task list is pinned.' }
-    }
-
-    return { result: isChanged ? describe(changed) : `No valid task number; nothing changed.\n${describe(changed)}` }
+    if (isChanged) await syncStatus($)
+    const summary = changed.list === null
+      ? `No task list is pinned.\nlistId: ${changed.listId ?? 0}`
+      : describe(changed.list, changed.listId ?? 0)
+    if (rejection) return { result: `${rejection}\n${summary}` }
+    if (changed.list === null) return { result: summary }
+    return { result: isChanged ? summary : `No valid task number; nothing changed.\n${summary}` }
   })
 
   on('command.run', { command: 'todo' }, async ($, e) => {
@@ -181,7 +201,7 @@ export const register: Register = on => {
         const label = indexes.map(i => i + 1).join(', ')
 
         text = `${label}번을 ${isDone ? '완료' : '미완료'}로 표시했습니다.`
-        context = [`The user marked tasks ${label} of the pinned list as ${isDone ? 'done' : 'not done'}.\n${describe(list)}`]
+        context = [`The user marked tasks ${label} of the pinned list as ${isDone ? 'done' : 'not done'}.\n${describe(list, state.listId ?? 0)}`]
         isApplied = true
 
         return { ...state, list, revision: state.revision + 1 }
@@ -362,10 +382,11 @@ async function migratePanel($: EngineInterface) {
 // Clearing is a replacement too: a numbered target read from the old list must
 // not apply to whatever comes next. The revision bump also discards a pending scan.
 async function clearList($: EngineInterface) {
-  await update($, panel, current => ({
+  const cleared = await update($, panel, current => ({
     ...current, list: null, listId: (current.listId ?? 0) + 1, revision: current.revision + 1,
   }))
   await syncStatus($)
+  return cleared
 }
 
 // Keep the status line, which no other plugin can cover, in step with each write.
@@ -378,11 +399,12 @@ async function changeList($: EngineInterface, change: (value: TaskList | null) =
 }
 
 async function pin($: EngineInterface, parsed: TaskList, isAsked: boolean) {
-  await update($, panel, state => ({
+  const pinned = await update($, panel, state => ({
     ...state, list: parsed, listId: (state.listId ?? 0) + 1, revision: state.revision + 1, isHidden: false, isExpanded: false,
   }))
   await syncStatus($)
   await openPane($, isAsked)
+  return pinned
 }
 
 // Opens the pane where the band cannot show the list, or where the person asked for it.
@@ -469,6 +491,7 @@ async function scan($: EngineInterface): Promise<{ text: string; context?: strin
 
   return {
     text: `할 일 ${applied.list.tasks.length}개를 고정했습니다. ${nextText}`,
-    context: [`The user pinned a task list found in your replies.\n${describe(applied.list)}`],
+    context: [`The user pinned a task list found in your replies.\n${describe(applied.list, applied.listId)}`],
   }
 }
+
