@@ -45,9 +45,9 @@ const MARK_SCHEMA = {
 
 // Set once this plugin's band hook runs. Another plugin that draws the band without passing it
 // on (or a surface with no band) leaves it false, and the list goes to a pane instead.
-let isBandSeen = false
-
 export const register: Register = on => {
+  let isBandSeen = false
+  let statusRequest = 0
   on('session.start', async ($, e, next) => {
     await migratePanel($)
     await $.tool.register({
@@ -234,7 +234,7 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     isBandSeen = true
-    const { list: current, isHidden, isExpanded: expanded } = await read($, panel)
+    const { list: current, listId, isHidden, isExpanded: expanded } = await read($, panel)
 
     if (e.props.hasSurvey || current === null || isHidden) {
       return next(e)
@@ -249,7 +249,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         <Box key="sized" width={Math.max(20, e.props.bodyColumns)}>
-          {drawList($, elements, current, { expanded, canExpand: true, canClose: false })}
+          {drawList($, elements, current, listId ?? 0, { expanded, canExpand: true, canClose: false })}
         </Box>
         {below}
       </Box>
@@ -257,7 +257,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const current = (await read($, panel)).list
+    const { list: current, listId } = await read($, panel)
     const elements = $.ui.resolve(e) as unknown as ListElements
     const { Box, Button, Text } = elements
 
@@ -272,226 +272,231 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column" width={Math.max(20, e.props.bodyColumns)}>
-        {drawList($, elements, current, { expanded: true, canExpand: false, canClose: true })}
+        {drawList($, elements, current, listId ?? 0, { expanded: true, canExpand: false, canClose: true })}
       </Box>
     )
   })
-}
 
-type ListElements = Pick<Elements['terminal'], 'Box' | 'Button' | 'Text'>
+  type ListElements = Pick<Elements['terminal'], 'Box' | 'Button' | 'Text'>
 
-type DrawOptions = { expanded: boolean; canExpand: boolean; canClose: boolean }
+  type DrawOptions = { expanded: boolean; canExpand: boolean; canClose: boolean }
 
-// The list as the band and the pane draw it: the next task, or every task when expanded.
-function drawList($: EngineInterface, { Box, Button, Text }: ListElements, current: TaskList, options: DrawOptions) {
-  const { expanded, canExpand, canClose } = options
-  const next_ = nextIndex(current)
-  const total = current.tasks.length
+  // The list as the band and the pane draw it: the next task, or every task when expanded.
+  function drawList($: EngineInterface, { Box, Button, Text }: ListElements, current: TaskList, listId: number, options: DrawOptions) {
+    const { expanded, canExpand, canClose } = options
+    const next_ = nextIndex(current)
+    const total = current.tasks.length
 
-  const toggle = (i: number) => changeList($, l => (l === null ? l : markTasks(l, [i], !l.tasks[i]?.isDone)))
-  // The next task is read again at press time, so two quick presses finish two tasks.
-  const finishNext = () =>
-    changeList($, l => {
-      const i = l === null ? -1 : nextIndex(l)
-      return l === null || i === -1 ? l : markTasks(l, [i], true)
+    const toggle = (i: number) => changeList($, l => (l === null ? l : markTasks(l, [i], !l.tasks[i]?.isDone)), listId)
+    // The next task is read again at press time, so two quick presses finish two tasks.
+    const finishNext = () =>
+      changeList($, l => {
+        const i = l === null ? -1 : nextIndex(l)
+        return l === null || i === -1 ? l : markTasks(l, [i], true)
+      })
+    const hide = async () => {
+      await update($, panel, state => ({ ...state, isHidden: true }))
+      await syncStatus($)
+    }
+
+    const header = (
+      <Box key="header">
+        <Text wrap="truncate-end">
+          <Text color="claude" bold>{next_ === -1 ? '✅ 할 일 완료' : '📋 다음 할 일'}</Text>
+          <Text dimColor> {doneCount(current)}/{total} · {current.title}</Text>
+        </Text>
+      </Box>
+    )
+
+    const controls = (
+      <Box key="controls" flexDirection="row" gap={1}>
+        {next_ !== -1 && <Button key="done" hotkey="d" label="✓ 완료" onPress={finishNext} />}
+        {canExpand && <Button key="expand" hotkey="a" label={expanded ? '접기' : `전체 (${total})`} onPress={() => update($, panel, state => ({ ...state, isExpanded: !state.isExpanded }))} />}
+        {next_ === -1 && <Button key="clear" hotkey="c" label="지우기" onPress={() => clearList($)} />}
+        {canExpand && <Button key="hide" hotkey="h" label="숨기기" onPress={hide} />}
+        {canClose && <Button key="close" hotkey="q" role="dismiss" label="닫기" onPress={() => closePane($)} />}
+      </Box>
+    )
+
+    if (!expanded) {
+      const task = next_ === -1 ? undefined : current.tasks[next_]
+
+      return (
+        <Box key="list" flexDirection="column">
+          {header}
+          {task !== undefined && (
+            <Box key="next">
+              <Text>
+                <Text bold>{next_ + 1}. </Text>
+                {task.group && <Text dimColor>[{task.group}] </Text>}
+                {task.text}
+              </Text>
+            </Box>
+          )}
+          {controls}
+        </Box>
+      )
+    }
+
+    const rows: JSX.Element[] = []
+    let group: string | undefined
+
+    current.tasks.forEach((task, i) => {
+      if (task.group !== undefined && task.group !== group) {
+        rows.push(<Box key={`g${i}`}><Text bold dimColor>{task.group}</Text></Box>)
+      }
+
+      group = task.group
+      const mark = task.isDone ? '✓' : i === next_ ? '▶' : '○'
+
+      rows.push(
+        <Button key={`t${i}`} plain onPress={() => toggle(i)}>
+          <Text color={i === next_ ? 'claude' : undefined} dimColor={task.isDone} strikethrough={task.isDone}>
+            {mark} {i + 1}. {task.text}
+          </Text>
+        </Button>,
+      )
     })
-  const hide = async () => {
-    await update($, panel, state => ({ ...state, isHidden: true }))
-    await syncStatus($)
-  }
-
-  const header = (
-    <Box key="header">
-      <Text wrap="truncate-end">
-        <Text color="claude" bold>{next_ === -1 ? '✅ 할 일 완료' : '📋 다음 할 일'}</Text>
-        <Text dimColor> {doneCount(current)}/{total} · {current.title}</Text>
-      </Text>
-    </Box>
-  )
-
-  const controls = (
-    <Box key="controls" flexDirection="row" gap={1}>
-      {next_ !== -1 && <Button key="done" hotkey="d" label="✓ 완료" onPress={finishNext} />}
-      {canExpand && <Button key="expand" hotkey="a" label={expanded ? '접기' : `전체 (${total})`} onPress={() => update($, panel, state => ({ ...state, isExpanded: !state.isExpanded }))} />}
-      {next_ === -1 && <Button key="clear" hotkey="c" label="지우기" onPress={() => clearList($)} />}
-      {canExpand && <Button key="hide" hotkey="h" label="숨기기" onPress={hide} />}
-      {canClose && <Button key="close" hotkey="q" role="dismiss" label="닫기" onPress={() => closePane($)} />}
-    </Box>
-  )
-
-  if (!expanded) {
-    const task = next_ === -1 ? undefined : current.tasks[next_]
 
     return (
       <Box key="list" flexDirection="column">
         {header}
-        {task !== undefined && (
-          <Box key="next">
-            <Text>
-              <Text bold>{next_ + 1}. </Text>
-              {task.group && <Text dimColor>[{task.group}] </Text>}
-              {task.text}
-            </Text>
-          </Box>
-        )}
+        {rows}
         {controls}
       </Box>
     )
   }
 
-  const rows: JSX.Element[] = []
-  let group: string | undefined
+  // Preserve the old atoms once when an existing session reloads the updated plugin.
+  // The raw reference lets update distinguish an unwritten panel from its default.
+  async function migratePanel($: EngineInterface) {
+    const oldList = await read($, { plugin: 'todo-panel', key: 'list' } as const)
+    const oldHidden = await read($, { plugin: 'todo-panel', key: 'isHidden' } as const)
+    const oldExpanded = await read($, { plugin: 'todo-panel', key: 'isExpanded' } as const)
+    await update($, { plugin: 'todo-panel', key: 'panel' } as const, state => state ?? {
+      ...panel.initial, list: oldList ?? null, isHidden: oldHidden ?? false, isExpanded: oldExpanded ?? false,
+    })
+  }
 
-  current.tasks.forEach((task, i) => {
-    if (task.group !== undefined && task.group !== group) {
-      rows.push(<Box key={`g${i}`}><Text bold dimColor>{task.group}</Text></Box>)
+  // Clearing is a replacement too: a numbered target read from the old list must
+  // not apply to whatever comes next. The revision bump also discards a pending scan.
+  async function clearList($: EngineInterface) {
+    const cleared = await update($, panel, current => ({
+      ...current, list: null, listId: (current.listId ?? 0) + 1, revision: current.revision + 1,
+    }))
+    await syncStatus($)
+    return cleared
+  }
+
+  // Keep the status line, which no other plugin can cover, in step with each write.
+  async function changeList($: EngineInterface, change: (value: TaskList | null) => TaskList | null, expectedListId?: number) {
+    const state = await update($, panel, current => {
+      // Recheck on every atomic retry, not just when the row was pressed.
+      if (expectedListId !== undefined && (current.listId ?? 0) !== expectedListId) return current
+      return { ...current, list: change(current.list), revision: current.revision + 1 }
+    })
+    await syncStatus($)
+    return state.list
+  }
+
+  async function pin($: EngineInterface, parsed: TaskList, isAsked: boolean) {
+    const pinned = await update($, panel, state => ({
+      ...state, list: parsed, listId: (state.listId ?? 0) + 1, revision: state.revision + 1, isHidden: false, isExpanded: false,
+    }))
+    await syncStatus($)
+    await openPane($, isAsked)
+    return pinned
+  }
+
+  // Opens the pane where the band cannot show the list, or where the person asked for it.
+  async function openPane($: EngineInterface, isAsked: boolean) {
+    if (isBandSeen && !isAsked) {
+      return
     }
 
-    group = task.group
-    const mark = task.isDone ? '✓' : i === next_ ? '▶' : '○'
-
-    rows.push(
-      <Button key={`t${i}`} plain onPress={() => toggle(i)}>
-        <Text color={i === next_ ? 'claude' : undefined} dimColor={task.isDone} strikethrough={task.isDone}>
-          {mark} {i + 1}. {task.text}
-        </Text>
-      </Button>,
-    )
-  })
-
-  return (
-    <Box key="list" flexDirection="column">
-      {header}
-      {rows}
-      {controls}
-    </Box>
-  )
-}
-
-// Preserve the old atoms once when an existing session reloads the updated plugin.
-// The raw reference lets update distinguish an unwritten panel from its default.
-async function migratePanel($: EngineInterface) {
-  const oldList = await read($, { plugin: 'todo-panel', key: 'list' } as const)
-  const oldHidden = await read($, { plugin: 'todo-panel', key: 'isHidden' } as const)
-  const oldExpanded = await read($, { plugin: 'todo-panel', key: 'isExpanded' } as const)
-  await update($, { plugin: 'todo-panel', key: 'panel' } as const, state => state ?? {
-    ...panel.initial, list: oldList ?? null, isHidden: oldHidden ?? false, isExpanded: oldExpanded ?? false,
-  })
-}
-
-// Clearing is a replacement too: a numbered target read from the old list must
-// not apply to whatever comes next. The revision bump also discards a pending scan.
-async function clearList($: EngineInterface) {
-  const cleared = await update($, panel, current => ({
-    ...current, list: null, listId: (current.listId ?? 0) + 1, revision: current.revision + 1,
-  }))
-  await syncStatus($)
-  return cleared
-}
-
-// Keep the status line, which no other plugin can cover, in step with each write.
-async function changeList($: EngineInterface, change: (value: TaskList | null) => TaskList | null) {
-  const state = await update($, panel, current => ({
-    ...current, list: change(current.list), revision: current.revision + 1,
-  }))
-  await syncStatus($)
-  return state.list
-}
-
-async function pin($: EngineInterface, parsed: TaskList, isAsked: boolean) {
-  const pinned = await update($, panel, state => ({
-    ...state, list: parsed, listId: (state.listId ?? 0) + 1, revision: state.revision + 1, isHidden: false, isExpanded: false,
-  }))
-  await syncStatus($)
-  await openPane($, isAsked)
-  return pinned
-}
-
-// Opens the pane where the band cannot show the list, or where the person asked for it.
-async function openPane($: EngineInterface, isAsked: boolean) {
-  if (isBandSeen && !isAsked) {
-    return
+    try {
+      await $.ui.open({ id: PANE, title: '할 일' })
+    } catch {
+      // No surface takes panes here; the status line still shows the next task.
+    }
   }
 
-  try {
-    await $.ui.open({ id: PANE, title: '할 일' })
-  } catch {
-    // No surface takes panes here; the status line still shows the next task.
-  }
-}
-
-async function closePane($: EngineInterface) {
-  try {
-    await $.ui.close({ id: PANE })
-  } catch {
-    // Already closed.
-  }
-}
-
-// The status line under the prompt: the next task, kept beside the engine's own notices.
-async function syncStatus($: EngineInterface) {
-  const state = await read($, panel)
-  const text = statusLine(state.list, state.isHidden)
-
-  try {
-    $.ui.status(text)
-  } catch {
-    // A session with no surface keeps no status line.
-  }
-}
-
-// Asks a fork of this conversation for the user's open steps, for a list the model never pinned.
-async function scan($: EngineInterface): Promise<{ text: string; context?: string[] }> {
-  // Starting a newer request invalidates earlier ones even if it finds no tasks.
-  const started = await update($, panel, state => ({ ...state, scanId: state.scanId + 1 }))
-  const reply = await $.model.fork({
-    prompt: 'Look at your recent replies in this conversation. List the steps you asked the USER to perform themselves (not your own work), in order, from the most recent such list. Answer with JSON only: {"title": string, "tasks": [{"text": string, "group"?: string, "done"?: boolean}]}, written in the user\'s language, "done": true for steps the user has already said they finished. Answer {"tasks": []} when there are none.',
-  })
-
-  if (!reply.isAnswered) {
-    return { text: `할 일을 찾지 못했습니다 (${reply.reason}).` }
+  async function closePane($: EngineInterface) {
+    try {
+      await $.ui.close({ id: PANE })
+    } catch {
+      // Already closed.
+    }
   }
 
-  const parsed = parseTasks(parseJsonObject(reply.text) ?? {})
+  // The status line under the prompt: the next task, kept beside the engine's own notices.
+  async function syncStatus($: EngineInterface) {
+    const request = ++statusRequest
+    const state = await read($, panel)
+    // A later request may have published a newer snapshot while this read waited.
+    // Request order also covers visibility changes, which do not change revision.
+    if (request !== statusRequest) return
+    const text = statusLine(state.list, state.isHidden)
 
-  if (parsed === undefined) {
-    return { text: '최근 응답에서 사용자가 할 일을 찾지 못했습니다.' }
+    try {
+      $.ui.status(text)
+    } catch {
+      // A session with no surface keeps no status line.
+    }
   }
 
-  // Validate and commit in one update so a concurrent clear/mark/pin cannot slip between them.
-  let isApplied = false
-  const applied = await update($, panel, state => {
-    isApplied = false
-    if (state.revision !== started.revision || state.scanId !== started.scanId) {
-      return state
+  // Asks a fork of this conversation for the user's open steps, for a list the model never pinned.
+  async function scan($: EngineInterface): Promise<{ text: string; context?: string[] }> {
+    // Starting a newer request invalidates earlier ones even if it finds no tasks.
+    const started = await update($, panel, state => ({ ...state, scanId: state.scanId + 1 }))
+    const reply = await $.model.fork({
+      prompt: 'Look at your recent replies in this conversation. List the steps you asked the USER to perform themselves (not your own work), in order, from the most recent such list. Answer with JSON only: {"title": string, "tasks": [{"text": string, "group"?: string, "done"?: boolean}]}, written in the user\'s language, "done": true for steps the user has already said they finished. Answer {"tasks": []} when there are none.',
+    })
+
+    if (!reply.isAnswered) {
+      return { text: `할 일을 찾지 못했습니다 (${reply.reason}).` }
     }
 
-    isApplied = true
-    const list = preserveProgress(state.list, parsed)
+    const parsed = parseTasks(parseJsonObject(reply.text) ?? {})
+
+    if (parsed === undefined) {
+      return { text: '최근 응답에서 사용자가 할 일을 찾지 못했습니다.' }
+    }
+
+    // Validate and commit in one update so a concurrent clear/mark/pin cannot slip between them.
+    let isApplied = false
+    const applied = await update($, panel, state => {
+      isApplied = false
+      if (state.revision !== started.revision || state.scanId !== started.scanId) {
+        return state
+      }
+
+      isApplied = true
+      const list = preserveProgress(state.list, parsed)
+
+      return {
+        ...state,
+        list,
+        // The same steps kept are the same list; anything else starts a new generation.
+        listId: list.tasks === state.list?.tasks ? state.listId ?? 0 : (state.listId ?? 0) + 1,
+        revision: state.revision + 1,
+        isHidden: false,
+        isExpanded: false,
+      }
+    })
+
+    if (!isApplied || applied.list === null) {
+      return { text: '스캔 중 목록이 변경되었거나 새 스캔이 시작되어 결과를 적용하지 않았습니다. /todo scan 으로 다시 시도해 주세요.' }
+    }
+
+    await syncStatus($)
+    await openPane($, true)
+    const next = nextIndex(applied.list)
+    const nextText = next === -1 ? '모두 완료' : `다음: ${next + 1}. ${applied.list.tasks[next]?.text}`
 
     return {
-      ...state,
-      list,
-      // The same steps kept are the same list; anything else starts a new generation.
-      listId: list.tasks === state.list?.tasks ? state.listId ?? 0 : (state.listId ?? 0) + 1,
-      revision: state.revision + 1,
-      isHidden: false,
-      isExpanded: false,
+      text: `할 일 ${applied.list.tasks.length}개를 고정했습니다. ${nextText}`,
+      context: [`The user pinned a task list found in your replies.\n${describe(applied.list, applied.listId)}`],
     }
-  })
-
-  if (!isApplied || applied.list === null) {
-    return { text: '스캔 중 목록이 변경되었거나 새 스캔이 시작되어 결과를 적용하지 않았습니다. /todo scan 으로 다시 시도해 주세요.' }
-  }
-
-  await syncStatus($)
-  await openPane($, true)
-  const next = nextIndex(applied.list)
-  const nextText = next === -1 ? '모두 완료' : `다음: ${next + 1}. ${applied.list.tasks[next]?.text}`
-
-  return {
-    text: `할 일 ${applied.list.tasks.length}개를 고정했습니다. ${nextText}`,
-    context: [`The user pinned a task list found in your replies.\n${describe(applied.list, applied.listId)}`],
   }
 }
-
