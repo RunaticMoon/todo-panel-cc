@@ -119,3 +119,10 @@ claude plugin validate .                      # check manifest and hooks
 claude plugin test .                          # run hooks/*.test.ts
 ```
 
+### Isolated UI race regression checks
+
+`node tests/ui-races.cjs /path/to/typescript` transpiles the actual hook sources and
+checks stale row callbacks (band and pane), atomic retries, rapid completion,
+legacy generations, and out-of-order status snapshots. The TypeScript argument
+may be omitted when `typescript` is installed locally. This deterministic mock
+harness complements, but does not replace, `claude plugin test .` in the host.
