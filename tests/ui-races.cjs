@@ -40,11 +40,12 @@ function runtime() {
   const $ = { ui: { status: text => statuses.push(text), open: async () => {}, close: async () => {}, resolve: () => ({ Box: 'Box', Button: 'Button', Text: 'Text' }) } }
   const emit = (name, event) => hooks.find(h => h.name === name && Object.entries(h.filter).every(([k,v]) => event[k] === v)).fn($, event, async () => null)
   const set = (texts = ['A', 'B', 'C']) => emit('tool.call', { tool: 'mcp__todo-panel__set_user_tasks', tasks: texts.map(text => ({ text })) })
+  const mark = input => emit('tool.call', { tool: 'mcp__todo-panel__mark_user_tasks', ...input })
   const command = args => emit('command.run', { command: 'todo', args })
   const render = component => emit('ui.render', { component, requestId: 'todo-panel', props: { bodyColumns: 80, hasSurvey: false } })
   const find = (node, key) => node && typeof node === 'object' && (node.props?.key === key ? node : node.children?.map(n => find(n, key)).find(Boolean))
   const press = (tree, key) => { const node = find(tree, key); assert.ok(node, key); return node.props.onPress() }
-  return { set, command, render, press, statuses, state: () => state,
+  return { set, mark, command, render, press, statuses, state: () => state,
     registerAgain: () => {
       const other = [], sink = []
       register((name, filter, fn) => other.push({ name, filter: typeof filter === 'function' ? {} : filter, fn: fn || filter }))
@@ -88,6 +89,100 @@ async function main() {
   // Legacy states normalize missing generation to zero.
   const r = runtime(); await r.set(); r.replace({ ...r.state(), listId: undefined }); await r.render('AbovePrompt'); await r.command('show')
   const tree = await r.render('AbovePrompt'); await r.press(tree, 't0'); assert.equal(r.state().list.tasks[0].isDone, true); checks++
+  // GH #13: the clear button carries the generation it was drawn for, so a press after
+  // a replacement or re-pin must leave the newer list alone.
+  const failures = []
+  async function check(name, fn) {
+    try {
+      await fn()
+      checks++
+    } catch (error) {
+      failures.push(`${name}: ${error.message}`)
+    }
+  }
+  // Pin A, complete it, and keep the clear callback the completed list rendered.
+  const completed = async surface => {
+    const r = runtime()
+    await r.set(['A'])
+    await r.command('done')
+    return { r, stale: await r.render(surface) }
+  }
+  for (const surface of ['AbovePrompt', 'Pane']) {
+    await check(`${surface}: stale clear keeps a replacement list`, async () => {
+      const { r, stale } = await completed(surface)
+      await r.set(['B'])
+      const before = r.state()
+      await r.press(stale, 'clear')
+      assert.equal(r.state(), before)
+      assert.equal(r.state().list.tasks[0].text, 'B')
+      assert.equal(r.state().list.tasks[0].isDone, false)
+      assert.equal(r.state().listId, before.listId)
+      assert.equal(r.state().revision, before.revision)
+    })
+    await check(`${surface}: stale clear is rechecked when the atomic update retries`, async () => {
+      const { r, stale } = await completed(surface)
+      const listId = r.state().listId + 1, revision = r.state().revision + 1
+      // Replace A with B between the first computation and its commit.
+      r.retry(() => r.replace({
+        ...r.state(),
+        list: { title: 'replacement', tasks: [{ text: 'B', isDone: false }] },
+        listId,
+        revision,
+      }))
+      await r.press(stale, 'clear')
+      assert.equal(r.state().listId, listId)
+      assert.equal(r.state().revision, revision)
+      assert.equal(r.state().list.tasks[0].text, 'B')
+      assert.equal(r.state().list.tasks[0].isDone, false)
+    })
+    await check(`${surface}: stale clear is rejected after clearing and re-pinning`, async () => {
+      const { r, stale } = await completed(surface)
+      await r.press(stale, 'clear')
+      assert.equal(r.state().list, null)
+      await r.set(['A'])
+      const before = r.state()
+      await r.press(stale, 'clear')
+      assert.equal(r.state(), before)
+      assert.equal(r.state().list.tasks[0].text, 'A')
+    })
+    await check(`${surface}: stale clear is rejected after an identical re-pin`, async () => {
+      const { r, stale } = await completed(surface)
+      await r.set(['A'])
+      const before = r.state()
+      await r.press(stale, 'clear')
+      assert.equal(r.state(), before)
+      assert.equal(r.state().listId, before.listId)
+      assert.equal(r.state().list.tasks[0].text, 'A')
+    })
+    await check(`${surface}: clear on its own generation still clears`, async () => {
+      const { r, stale } = await completed(surface)
+      const before = r.state()
+      await r.press(stale, 'clear')
+      assert.equal(r.state().list, null)
+      assert.equal(r.state().listId, before.listId + 1)
+      assert.equal(r.state().revision, before.revision + 1)
+    })
+  }
+  // The model tool's clear and /todo clear keep clearing unconditionally.
+  await check('model clear ignores a stale listId', async () => {
+    const r = runtime()
+    await r.set(['A'])
+    await r.set(['B'])
+    const before = r.state()
+    await r.mark({ clear: true, listId: before.listId - 1 })
+    assert.equal(r.state().list, null)
+    assert.equal(r.state().listId, before.listId + 1)
+  })
+  await check('/todo clear stays unconditional', async () => {
+    const r = runtime()
+    await r.set(['A'])
+    await r.set(['B'])
+    const before = r.state()
+    await r.command('clear')
+    assert.equal(r.state().list, null)
+    assert.equal(r.state().listId, before.listId + 1)
+  })
+  if (failures.length) throw new Error(`${failures.length} new scenario(s) failed:\n${failures.join('\n')}`)
   console.log(`${checks} UI race regression scenarios passed`)
 }
 main().catch(error => { console.error(error); process.exitCode = 1 })
