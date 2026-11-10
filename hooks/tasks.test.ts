@@ -22,6 +22,96 @@ test('parseJsonObject finds the object among prose and fences', async () => {
   expect(parseJsonObject('nothing here')).toBeUndefined()
 })
 
+test('parseJsonObject reads a bare JSON reply whose strings contain fences', async () => {
+  const payload = {
+    title: '설정 파일 준비',
+    tasks: [
+      { text: 'config.json 파일에 다음 내용을 저장하세요:\n```json\n{}\n```' },
+      { text: '설정 파일을 저장한 다음 프로그램을 다시 실행하세요.' },
+    ],
+  }
+  const reply = JSON.stringify(payload)
+  const parsed = parseJsonObject(reply)
+
+  expect(parsed).toEqual(payload)
+  expect(parseJsonObject(`  ${reply}\n`)).toEqual(payload)
+  expect(parseTasks(parsed ?? {})?.tasks.length).toBe(2)
+  expect(parseTasks(parsed ?? {})?.tasks.map(task => task.text)).toEqual(payload.tasks.map(task => task.text))
+  expect(parseJsonObject('{"tasks": []}')).toEqual({ tasks: [] })
+})
+
+test('parseJsonObject preserves fences, braces and escaped quotes in values', async () => {
+  const payload = {
+    title: '제목 "인용" ```json\n{}\n```',
+    tasks: [{
+      group: '그룹 {중괄호} "인용" ```json\n{}\n```',
+      text: 'config.json 파일에 다음 내용을 저장하세요:\n```json\n{"key": "value"}\n``` 그리고 "따옴표"',
+    }],
+  }
+  const parsed = parseJsonObject(JSON.stringify(payload))
+
+  expect(parsed).toEqual(payload)
+  expect(parseTasks(parsed ?? {})?.title).toBe(payload.title)
+  expect(parseTasks(parsed ?? {})?.tasks[0]?.text).toBe(payload.tasks[0].text)
+  expect(parseTasks(parsed ?? {})?.tasks[0]?.group).toBe(payload.tasks[0].group)
+})
+
+test('parseJsonObject reads a real outer fence, even one around an inner fence', async () => {
+  const payload = { title: 'outer', tasks: [{ text: 'run:\n```json\n{}\n```' }] }
+
+  expect(parseJsonObject(`\`\`\`json\n${JSON.stringify(payload)}\n\`\`\``)).toEqual(payload)
+  expect(parseJsonObject('```json\n{"tasks": ["a"]}\n```')).toEqual({ tasks: ['a'] })
+})
+
+test('parseJsonObject reads a fence that begins where a raw object ends', async () => {
+  expect(parseJsonObject('{"tasks":["a"]}```json\n{"tasks":["b"]}\n```')).toEqual({ tasks: ['b'] })
+})
+
+test('parseJsonObject prefers the outer object when a fence closes the regex early', async () => {
+  const payload = {
+    title: 'outer fence',
+    tasks: [
+      { text: 'first step' },
+      { text: 'save:\n```json\n{}\n```' },
+      { text: 'third' },
+    ],
+  }
+  const fenced = `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``
+
+  expect(parseJsonObject(fenced)).toEqual(payload)
+  expect(parseTasks(parseJsonObject(fenced) ?? {})?.tasks.length).toBe(3)
+})
+
+test('parseJsonObject prefers the outer object when prose wraps that fence', async () => {
+  const payload = {
+    title: 'outer fence',
+    tasks: [
+      { text: 'first step' },
+      { text: 'save:\n```json\n{}\n```' },
+      { text: 'third' },
+    ],
+  }
+  const fenced = `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``
+  const prose = `Here are the steps:\n${fenced}\nDone.`
+
+  expect(parseJsonObject(prose)).toEqual(payload)
+  expect(parseTasks(parseJsonObject(prose) ?? {})?.tasks.map(task => task.text)).toEqual(payload.tasks.map(task => task.text))
+  expect(parseTasks(parseJsonObject(prose) ?? {})?.tasks.length).toBe(3)
+})
+
+test('parseJsonObject reads bare and fenced objects wrapped in prose', async () => {
+  const payload = { title: '설정 파일 준비', tasks: [{ text: 'save:\n```json\n{}\n```' }] }
+  const json = JSON.stringify(payload)
+
+  expect(parseJsonObject(`Here are the steps:\n${json}\nDone.`)).toEqual(payload)
+  expect(parseJsonObject(`Here are the steps:\n\`\`\`json\n${json}\n\`\`\`\nDone.`)).toEqual(payload)
+})
+
+test('parseJsonObject still rejects replies with no JSON object', async () => {
+  expect(parseJsonObject('{not json}')).toBeUndefined()
+  expect(parseJsonObject('```json\n{not json}\n```')).toBeUndefined()
+})
+
 test('statusLine names the next task, or says all are done', async () => {
   const list = parseTasks({ tasks: ['a', 'b'] })!
   expect(statusLine(list, false)).toBe('📋 다음 할 일 1/2: a')
