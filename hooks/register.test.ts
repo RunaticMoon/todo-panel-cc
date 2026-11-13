@@ -463,6 +463,33 @@ test('scan pins a list and preserves local done and undone states in the panel a
   await ui.unmount()
 })
 
+test('scan pins tasks whose text contains a JSON code fence', async ($, on) => {
+  engineBand(on)
+  const opened: string[] = []
+  const reply = JSON.stringify({
+    title: '설정 파일 준비',
+    tasks: [
+      { text: 'config.json 파일에 다음 내용을 저장하세요:\n```json\n{}\n```' },
+      { text: '설정 파일을 저장한 다음 프로그램을 다시 실행하세요.' },
+    ],
+  })
+  on('model.fork', () => ({ value: answered(reply) }))
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true as const } }
+  })
+
+  const ui = await $.ui.mount({ plugin: 'todo-panel', surface: 'terminal', ...BAND })
+  const answer = await $.command.run(todo('scan'))
+
+  expect(answer.text).not.toContain('찾지 못했습니다')
+  expect(answer.text).toContain('할 일 2개를 고정했습니다. 다음: 1.')
+  expect((await ui.find({ key: 'header' }))?.text).toContain('0/2')
+  expect((await ui.find({ key: 'next' }))?.text).toContain('config.json')
+  expect(opened).toEqual(['todo-panel'])
+  await ui.unmount()
+})
+
 test('scan discards replies after local changes, clearing, replacement, or an ABA change', async ($, on) => {
   engineBand(on)
   let started = deferred<void>()

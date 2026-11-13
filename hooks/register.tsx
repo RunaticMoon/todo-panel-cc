@@ -320,7 +320,7 @@ function drawList($: EngineInterface, local: Local, { Box, Button, Text }: ListE
     <Box key="controls" flexDirection="row" gap={1}>
       {next_ !== -1 && <Button key="done" hotkey="d" label="✓ 완료" onPress={finishNext} />}
       {canExpand && <Button key="expand" hotkey="a" label={expanded ? '접기' : `전체 (${total})`} onPress={() => update($, panel, state => ({ ...state, isExpanded: !state.isExpanded }))} />}
-      {next_ === -1 && <Button key="clear" hotkey="c" label="지우기" onPress={() => clearList($, local)} />}
+      {next_ === -1 && <Button key="clear" hotkey="c" label="지우기" onPress={() => clearList($, local, listId)} />}
       {canExpand && <Button key="hide" hotkey="h" label="숨기기" onPress={hide} />}
       {canClose && <Button key="close" hotkey="q" role="dismiss" label="닫기" onPress={() => closePane($)} />}
     </Box>
@@ -388,10 +388,16 @@ async function migratePanel($: EngineInterface) {
 
 // Clearing is a replacement too: a numbered target read from the old list must
 // not apply to whatever comes next. The revision bump also discards a pending scan.
-async function clearList($: EngineInterface, local: Local) {
-  const cleared = await update($, panel, current => ({
-    ...current, list: null, listId: (current.listId ?? 0) + 1, revision: current.revision + 1,
-  }))
+// The button names the generation it was drawn for, so a press after a replacement
+// or a re-pin leaves the newer list alone.
+async function clearList($: EngineInterface, local: Local, expectedListId?: number) {
+  const cleared = await update($, panel, current => {
+    // Recheck on every atomic retry, not just when the button was pressed.
+    if (expectedListId !== undefined && (current.listId ?? 0) !== expectedListId) return current
+    return {
+      ...current, list: null, listId: (current.listId ?? 0) + 1, revision: current.revision + 1,
+    }
+  })
   await syncStatus($, local)
   return cleared
 }

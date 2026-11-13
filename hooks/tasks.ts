@@ -98,15 +98,53 @@ export function describe(list: TaskList, listId?: number): string {
 
 // Pulls the first JSON object out of a model reply that may wrap it in prose or a fence.
 export function parseJsonObject(text: string): Record<string, unknown> | undefined {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text)?.[1]
+  // A reply that is already one JSON object is authoritative, even when its
+  // strings contain code fences that look like the response boundary.
+  try {
+    const whole: unknown = JSON.parse(text.trim())
 
-  for (const source of fenced === undefined ? [text] : [fenced, text]) {
-    for (let start = source.indexOf('{'); start !== -1; start = source.indexOf('{', start + 1)) {
-      const value = parseBalanced(source, start)
+    if (isJsonObject(whole)) {
+      return whole
+    }
+  } catch {
+    // Wrapped in prose or a fence; extract the object below.
+  }
 
-      if (value !== undefined) {
-        return value
-      }
+  const fence = /```(?:json)?\s*([\s\S]*?)```/.exec(text)
+  const raw = findJsonObject(text)
+
+  // A fence inside a JSON string is not a boundary. The regex stops at the first
+  // closing ``` it sees, so a real outer fence leaves it holding a truncated body;
+  // prefer the raw object when it crosses the opening fence or outlives that stop.
+  if (raw !== undefined && fence !== null) {
+    const bodyStart = fence.index + fence[0].length - fence[1].length - 3
+    const bodyEnd = fence.index + fence[0].length - 3
+    const crossesOpening = raw.start < fence.index && fence.index < raw.end
+    const crossesClosing = bodyStart <= raw.start && bodyEnd < raw.end
+
+    if (crossesOpening || crossesClosing) {
+      return raw.value
+    }
+  }
+
+  if (fence !== null) {
+    const fenced = findJsonObject(fence[1])
+
+    if (fenced !== undefined) {
+      return fenced.value
+    }
+  }
+
+  return raw?.value
+}
+
+// The first object in `source` that parses, with the span it occupies.
+function findJsonObject(source: string): { value: Record<string, unknown>; start: number; end: number } | undefined {
+  for (let start = source.indexOf('{'); start !== -1; start = source.indexOf('{', start + 1)) {
+    const found = parseBalanced(source, start)
+
+    if (found !== undefined) {
+      return { ...found, start }
     }
   }
 
@@ -114,7 +152,7 @@ export function parseJsonObject(text: string): Record<string, unknown> | undefin
 }
 
 // Parses the object that opens at `start`, its end found by counting braces outside strings.
-function parseBalanced(source: string, start: number): Record<string, unknown> | undefined {
+function parseBalanced(source: string, start: number): { value: Record<string, unknown>; end: number } | undefined {
   let depth = 0
   let isInString = false
 
@@ -131,7 +169,7 @@ function parseBalanced(source: string, start: number): Record<string, unknown> |
     } else if (char === '}' && --depth === 0) {
       try {
         const value: unknown = JSON.parse(source.slice(start, i + 1))
-        return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined
+        return isJsonObject(value) ? { value, end: i + 1 } : undefined
       } catch {
         return undefined
       }
@@ -139,5 +177,9 @@ function parseBalanced(source: string, start: number): Record<string, unknown> |
   }
 
   return undefined
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
